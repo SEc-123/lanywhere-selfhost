@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <fcntl.h>
+#include <iterator>
 #include <mutex>
 #include <new>
 #include <poll.h>
