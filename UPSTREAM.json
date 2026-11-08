@@ -1,0 +1,36 @@
+{
+  "project": "LANywhere",
+  "repository": "https://github.com/augustocco/lanywhere",
+  "commit": "7f2bb47bacc972f9ae11ae9a48e35991d09a9837",
+  "license": "GPL-2.0-only",
+  "derived_version": "0.4.7",
+  "submodules": {
+    "console/Atmosphere-libs": {
+      "repository": "https://github.com/Atmosphere-NX/Atmosphere-libs.git",
+      "commit": "cf48d23375cf36742876f4b014971b2ebabc6dc8"
+    },
+    "console/libtesla": {
+      "repository": "https://github.com/WerWolv/libtesla.git",
+      "commit": "f766e9b607a05e9756843cbd62b3bfb98be1646c"
+    }
+  },
+  "status": "development beta; physical multi-console acceptance required",
+  "toolchain": {
+    "devkitA64": "r29.2 / GCC 15.2.0 (official container profile)",
+    "switch_tools": "1.13.1",
+    "libnx_commit": "b156b4774fb2df7b93402169509266da7547fc4c",
+    "package_lock": "scripts/toolchain/packages.lock.json",
+    "cross_build_host": "Linux x86_64 Docker on macOS",
+    "macos_execution_tested": false,
+    "active_build_profile": "scripts/toolchain/container-profile.json"
+  },
+  "protocol_references": {
+    "ldn_mitm_fork": {
+      "repository": "https://github.com/jieluojun/ldn_mitm",
+      "commit": "1014c70d5f82b19bf774b00c851c237d805531ae",
+      "license": "GPL-2.0-only",
+      "scope": "Reference implementation for LAN Play fork interoperability; supplied archive binary origin not reproducibly established",
+      "license_notes": "Upstream README documents exemptions for specific named projects; see its LICENSE and README."
+    }
+  }
+}

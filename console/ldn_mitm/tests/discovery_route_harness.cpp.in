@@ -1,0 +1,185 @@
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <csignal>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include "list_status.h"
+using u8=uint8_t;using u16=uint16_t;using u32=uint32_t;using u64=uint64_t;using s64=int64_t;using Result=int;
+#define constinit
+#ifndef RELAY_PROFILE_FIXED
+#define RELAY_PROFILE_FIXED 0
+#endif
+#define RELAY_PROFILE_IPV4 "127.0.0.1"
+#define RELAY_PROFILE_PORT 11460
+#define R_SUCCEEDED(x) ((x)==0)
+#define R_FAILED(x) ((x)!=0)
+#define R_RETURN(x) return (x)
+[[maybe_unused]] constexpr u16 DefaultPort=11460;
+constexpr size_t NickLength=32,CodeLength=6,MaxControl=0x500,GroupPageSize=6,GroupRecordSize=6+0x480,MatchFilterSize=96;
+constexpr s64 MaxConfigSize=511;
+constexpr u32 GroupPageEnd=UINT32_MAX,CapabilityPages=2,CapabilityFilteredFind=16;
+constexpr u8 Features=1,T_SelectProvider=0x20,T_ProviderSelected=0xa0,T_Caps=0x0b,T_CapsReply=0x89,
+ T_Error=0x85,T_Find=8,T_FindPage=0x0c,T_FindFilter=0x0d,T_Groups=0x87,T_Page=0x8a,T_Join=2;
+constexpr int ConnectTimeoutMs=1000,MatchIoTimeoutMs=500;
+constexpr const char *ConfigPath="sdmc:/lanywhere/config.ini";
+namespace os {
+ using SdkMutex=std::mutex;
+ struct Span {s64 ms; s64 GetMilliSeconds()const{return ms;}};
+ struct Tick {s64 ms; Span ToTimeSpan()const{return {ms};}};
+ inline Tick operator-(Tick a,Tick b){return {a.ms-b.ms};}
+ inline Tick GetSystemTick(){return {std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()};}
+ inline void GenerateRandomBytes(void *p,size_t n){std::memset(p,0,n);}
+}
+namespace util {
+ inline void Strlcpy(char *out,const char *in,size_t n){if(n){const size_t len=std::min(n-1,std::strlen(in));std::memcpy(out,in,len);out[len]=0;}}
+ template<class...A>int SNPrintf(char *p,size_t n,const char *fmt,A...a){return std::snprintf(p,n,fmt,a...);}
+}
+namespace fs {
+ struct Data {std::string value;};using FileHandle=std::shared_ptr<Data>;
+ enum {OpenMode_Read=1,OpenMode_Write=2,OpenMode_AllowAppend=4};
+ enum class WriteOption {Flush};
+ struct ResultPathNotFound {static bool Includes(Result r){return r==2;}};
+ static std::unordered_map<std::string,std::shared_ptr<Data>> files;
+ static int read_opens=0,writes=0,creates=0;static bool denied=false,fail_size=false,short_read=false;
+ Result OpenFile(FileHandle *out,const char *path,int mode){if(mode==OpenMode_Read)read_opens++;if(denied)return 9;auto i=files.find(path);if(i==files.end())return 2;*out=i->second;return 0;}
+ Result GetFileSize(s64 *n,FileHandle f){if(fail_size)return 9;*n=f->value.size();return 0;}
+ Result ReadFile(size_t *got,FileHandle f,s64 off,void *out,size_t n){if(off<0||size_t(off)>f->value.size())return 9;n=std::min(n,f->value.size()-size_t(off));if(short_read&&n)n--;std::memcpy(out,f->value.data()+off,n);*got=n;return 0;}
+ void CloseFile(FileHandle &f){f.reset();}
+ Result CreateDirectory(const char*){return 0;}
+ Result CreateFile(const char *path,size_t){creates++;files[path]=std::make_shared<Data>();return 0;}
+ Result WriteFile(FileHandle f,s64 off,const void *p,size_t n,WriteOption){writes++;if(off<0)return 9;if(size_t(off)+n>f->value.size())f->value.resize(size_t(off)+n);std::memcpy(&f->value[size_t(off)],p,n);return 0;}
+}
+static std::mutex g_lock;static bool g_public=true;static char g_nick[32]{},g_error[64]{};
+enum class RelayState {Idle,InRoom,Error};static RelayState g_state=RelayState::Idle;
+static int ResultRelayFailed(){return 1;}
+/* ACTUAL_ROUTE */
+/* ACTUAL_GAME_ROUTE */
+/* ACTUAL_LE16 */
+/* ACTUAL_LE32 */
+/* ACTUAL_LE64 */
+/* ACTUAL_PUT16 */
+/* ACTUAL_PUT32 */
+/* ACTUAL_PUT64 */
+static bool ValidCode(const char *code){if(std::strlen(code)!=6)return false;for(int i=0;i<6;i++){char c=code[i];if(!((c>='A'&&c<='Z'&&c!='I'&&c!='O')||(c>='2'&&c<='9')))return false;}return true;}
+/* ACTUAL_LOAD */
+/* ACTUAL_RESOLVE */
+/* ACTUAL_CHOOSE */
+/* ACTUAL_CAPTURE */
+/* ACTUAL_CURRENT */
+/* ACTUAL_NICKNAME */
+/* ACTUAL_SEND */
+/* ACTUAL_READ */
+/* ACTUAL_READ_LIST */
+/* ACTUAL_CONNECT */
+bool QueryCapabilities(int fd, u32 *flags, int timeout_ms, u32 *status = nullptr);
+/* ACTUAL_CAPS */
+namespace ldn {
+ constexpr u32 ScanFilterFlag_LocalCommunicationId=1;
+ struct ScanFilter{u32 flag=1;struct {struct {u64 localCommunicationId=42;}intentId;}networkId;bool valid=true;};
+}
+static bool MakeMatchFilter(const ldn::ScanFilter &f,u8 (&out)[MatchFilterSize]){put64(out,f.networkId.intentId.localCommunicationId);return f.valid;}
+/* ACTUAL_LEGACY */
+/* ACTUAL_PAGE */
+/* ACTUAL_CONNECTION */
+/* ACTUAL_UNFILTERED */
+/* ACTUAL_FIND */
+/* ACTUAL_FIND_PAGE */
+/* ACTUAL_FILTERED */
+static int enter_calls=0;static sockaddr_in entered_server{};static std::string entered_provider;static bool matched=false;
+static bool MatchArmed(){return matched;}static void CancelMatch(){matched=false;}
+static Result Enter(u8,const u8*,size_t,const sockaddr_in *pinned=nullptr,u8 *error=nullptr,const u8 *owner=nullptr,const DiscoveryRoute *route=nullptr,GameRoute *joined=nullptr);
+Result JoinRoom(const char*,u64,const DiscoveryRoute*,GameRoute *joined=nullptr);
+/* ACTUAL_JOIN */
+static Result Enter(u8,const u8*,size_t,const sockaddr_in *pinned,u8*,const u8*,const DiscoveryRoute *route,GameRoute *joined){
+ enter_calls++;char provider[33]{};std::scoped_lock lock(g_lock);if(!ChooseEnterRoute(pinned,route,&entered_server,provider))return 1;entered_provider=provider;
+ if(joined){*joined={};joined->discovery.ipv4=entered_server.sin_addr.s_addr;joined->discovery.port=entered_server.sin_port;util::Strlcpy(joined->discovery.provider,provider,sizeof(joined->discovery.provider));joined->room_token=91;joined->room_epoch=11;std::memcpy(joined->room_code,"ABC234",6);}return 0;
+}
+static void config(u16 port,const char *provider="lanywhere-public",bool pub=true){
+ std::scoped_lock lock(g_lock);fs::files[ConfigPath]=std::make_shared<fs::Data>(fs::Data{"server=127.0.0.1\nport="+std::to_string(port)+"\nnetwork="+provider+"\npublic="+(pub?"1":"0")+"\napodo=Tester\n"});
+ fs::denied=fs::fail_size=fs::short_read=false;
+}
+static void write_all(int fd,const u8 *p,size_t n){while(n){auto s=::send(fd,p,n,0);if(s<=0)return;p+=s;n-=s;}}
+static void response(int fd,u8 type,const std::vector<u8> &body){u8 h[3];put16(h,body.size()+1);h[2]=type;write_all(fd,h,3);write_all(fd,body.data(),body.size());}
+static bool receive(int fd,u8 &type,std::vector<u8> &body){u8 h[3];size_t n=0;while(n<3){auto got=::recv(fd,h+n,3-n,0);if(got<=0)return false;n+=got;}if(le16(h)<1)return false;type=h[2];body.resize(le16(h)-1);n=0;while(n<body.size()){auto got=::recv(fd,body.data()+n,body.size()-n,0);if(got<=0)return false;n+=got;}return true;}
+class Relay {
+ int listener;std::thread thread;std::atomic<bool>stop{false};
+ public:
+ std::atomic<int>connections{0},selects{0},finds{0},pages{0},filters{0};u16 port;u32 caps;bool reject_select=false,legacy_error=false;u8 select_error=7;int select_delay_ms=0;std::string expected_provider="lanywhere-public";u16 mutate_port=0;
+ Relay(u32 bits):caps(bits){listener=::socket(AF_INET,SOCK_STREAM,0);assert(listener>=0);int one=1;::setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);assert(::bind(listener,(sockaddr*)&a,sizeof(a))==0);assert(::listen(listener,10)==0);socklen_t n=sizeof(a);assert(::getsockname(listener,(sockaddr*)&a,&n)==0);port=ntohs(a.sin_port);thread=std::thread([this]{run();});}
+ ~Relay(){stop=true;::shutdown(listener,SHUT_RDWR);::close(listener);thread.join();}
+ void run(){while(!stop){pollfd p{listener,POLLIN,0};if(::poll(&p,1,100)<=0)continue;int fd=::accept(listener,nullptr,nullptr);if(fd<0)continue;connections++;timeval t{2,0};::setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));u8 type;std::vector<u8>b;while(receive(fd,type,b)){
+ if(type==T_SelectProvider){selects++;if(reject_select){response(fd,T_Error,{select_error});break;}assert(std::string(b.begin(),b.end())==expected_provider);if(select_delay_ms)std::this_thread::sleep_for(std::chrono::milliseconds(select_delay_ms));std::vector<u8>reply(5+b.size());put32(reply.data(),caps);reply[4]=b.size();std::memcpy(reply.data()+5,b.data(),b.size());response(fd,T_ProviderSelected,reply);}
+ else if(type==T_Caps){if(mutate_port)config(mutate_port,"self",false);if(legacy_error)response(fd,T_Error,{4});else{std::vector<u8>reply(4);put32(reply.data(),caps);response(fd,T_CapsReply,reply);}}
+ else if(type==T_Find||type==T_FindPage||type==T_FindFilter){u32 offset=0;if(type==T_Find){finds++;assert(b.size()==15);}else if(type==T_FindPage){pages++;assert(b.size()==12);offset=le32(b.data()+8);}else{filters++;assert(b.size()==101);offset=le32(b.data()+97);}const bool paged=type!=T_Find;size_t count=paged&&!offset?6:1;std::vector<u8>reply((paged?5:1)+count*GroupRecordSize);if(paged)put32(reply.data(),offset?GroupPageEnd:6);reply[paged?4:0]=count;for(size_t i=0;i<count;i++){size_t at=(paged?5:1)+i*GroupRecordSize;std::memcpy(reply.data()+at,"ABC234",6);put64(reply.data()+at+6,42);}response(fd,paged?T_Page:T_Groups,reply);}
+ else assert(false);
+ }::close(fd);}}
+};
+static int found_count=0;static void found(const char *code,const void *info,void*){assert(!std::strcmp(code,"ABC234"));assert(le64(static_cast<const u8*>(info))==42);found_count++;}
+int main(){
+ std::signal(SIGPIPE,SIG_IGN);
+ unsigned checks=0;
+ if (RELAY_PROFILE_FIXED) {
+  fs::files.clear();DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route)&&std::string(route.provider)=="self"&&route.port==htons(11460));checks++;
+  config(9,"lanywhere-public");assert(CaptureDiscoveryRoute(&route)&&std::string(route.provider)=="lanywhere-public"&&route.port==htons(11460));checks++;
+  for(const std::string &bad:{std::string("network=invalid\n"),std::string("network=self\nnetwork=lanywhere-public\n"),std::string(512,'x'),std::string("network=self\n\0tail",18)}){
+   fs::files[ConfigPath]=std::make_shared<fs::Data>(fs::Data{bad});fs::writes=fs::creates=0;assert(!CaptureDiscoveryRoute(&route));char nick[32];Nickname(nick,sizeof(nick));assert(fs::writes==0&&fs::creates==0&&std::string(nick)=="Player");checks++;
+  }
+  config(9);for(int mode=0;mode<3;mode++){fs::denied=mode==0;fs::fail_size=mode==1;fs::short_read=mode==2;fs::writes=fs::creates=0;assert(!CaptureDiscoveryRoute(&route));char nick[32];Nickname(nick,sizeof(nick));assert(fs::writes==0&&fs::creates==0);checks++;}fs::denied=fs::fail_size=fs::short_read=false;
+  std::printf("Actual fixed-profile config/nickname slices: %u scenarios passed.\n",checks);return 0;
+ }
+ Relay other(2);
+ for(u32 caps:{0u,2u,18u}){
+  Relay relay(caps);relay.legacy_error=caps==0;relay.mutate_port=other.port;config(relay.port);fs::read_opens=0;found_count=0;ldn::ScanFilter filter;DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));assert(fs::read_opens==1);u32 next=0;
+  assert(FindGroupsFilteredPage(filter,0,&next,found,nullptr,&route)==(caps?6:1));assert(fs::read_opens==1);assert(relay.connections==1&&relay.selects==1&&other.connections==0);checks++;
+  if(caps){assert(next==6);assert(FindGroupsFilteredPage(filter,6,&next,found,nullptr,&route)==1);assert(next==GroupPageEnd&&found_count==7&&fs::read_opens==1&&relay.connections==2&&other.connections==0);checks++;}
+  assert((caps==0&&relay.finds==1)||(caps==2&&relay.pages==(caps?2:1))||(caps==18&&relay.filters==2));
+ }
+ {Relay relay(0);relay.legacy_error=true;relay.mutate_port=other.port;config(relay.port);fs::read_opens=0;u32 next=0;assert(FindGroupsPage(42,0,&next,found,nullptr,nullptr)==1);assert(fs::read_opens==1&&relay.connections==1&&other.connections==0);checks++;}
+ {Relay relay(2);config(relay.port);fs::read_opens=0;ldn::ScanFilter f;f.valid=false;u32 next=0;assert(FindGroupsFilteredPage(f,0,&next,found,nullptr,nullptr)==6);assert(fs::read_opens==1&&relay.connections==1&&relay.pages==1);checks++;}
+ {Relay relay(0);relay.reject_select=true;config(relay.port);fs::read_opens=0;u32 next=0;assert(FindGroupsPage(42,0,&next,found,nullptr,nullptr)==-1);assert(relay.finds==0&&relay.connections==1&&other.connections==0);checks++;}
+ {Relay relay(0);config(relay.port);DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));config(other.port,"self");enter_calls=0;assert(R_FAILED(JoinRoom("ABC234",42,&route)));assert(enter_calls==0&&std::string(g_error)=="Network changed; search again.");checks++;
+  config(relay.port);enter_calls=0;assert(R_SUCCEEDED(JoinRoom("ABC234",42,&route)));assert(enter_calls==1&&entered_provider=="lanywhere-public"&&entered_server.sin_port==htons(relay.port));checks++;
+  config(relay.port);GameRoute joined{};enter_calls=0;assert(R_SUCCEEDED(JoinRoom("ABC234",42,&route,&joined)));assert(enter_calls==1&&joined.room_token==91&&joined.room_epoch==11&&!std::strcmp(joined.room_code,"ABC234")&&std::string(joined.discovery.provider)=="lanywhere-public");checks++;
+  config(other.port,"self");enter_calls=0;assert(R_SUCCEEDED(JoinRoom("ABC234",0,nullptr)));assert(enter_calls==1&&entered_provider=="self"&&entered_server.sin_port==htons(other.port));checks++;
+  sockaddr_in fixed{};fixed.sin_family=AF_INET;fixed.sin_port=htons(relay.port);fixed.sin_addr.s_addr=htonl(INADDR_LOOPBACK);sockaddr_in chosen{};char provider[33]{};assert(ChooseEnterRoute(&fixed,nullptr,&chosen,provider)&&std::string(provider)=="self");assert(!ChooseEnterRoute(&fixed,&route,&chosen,provider));checks++;
+ }
+ {Relay relay(0);relay.expected_provider="lanplay-nl";relay.select_delay_ms=1200;config(relay.port,"lanplay-nl");DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));sockaddr_in server{};char provider[33]{};assert(ResolveDiscoveryRoute(route,&server,provider));const char *error=nullptr;const int fd=ConnectServer(server,&error,100,provider);assert(fd>=0&&relay.connections==1&&relay.selects==1);::close(fd);checks++;}
+ {Relay relay(0);relay.expected_provider="lanplay-nl";relay.select_delay_ms=700;config(relay.port,"lanplay-nl");
+  DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));sockaddr_in server{};char provider[33]{};assert(ResolveDiscoveryRoute(route,&server,provider));
+  const char *error=nullptr;u32 status=ListStatusOk;
+  const auto start=os::GetSystemTick();
+  const u64 deadline=static_cast<u64>(start.ToTimeSpan().GetMilliSeconds())+200;
+  assert(ConnectServer(server,&error,100,provider,&status,deadline)<0);
+  const auto elapsed=(os::GetSystemTick()-start).ToTimeSpan().GetMilliSeconds();
+  assert(status==ListStatusTimeout&&relay.selects==1&&elapsed<650);checks++;
+ }
+ for(const char *network : {"lanplay-cn-jax","lanplay-cn-gugu","lanplay-cn-olunira","lanplay-cn-shanghai"}) {
+  config(11460,network);DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));sockaddr_in dest{};char selected[33]{};
+  assert(ResolveDiscoveryRoute(route,&dest,selected));assert(std::string(selected)==network);checks++;
+ }
+ for(u8 error_code:{u8(7),u8(8),u8(4)}){Relay relay(0);relay.reject_select=true;relay.select_error=error_code;config(relay.port);DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));sockaddr_in server{};char provider[33]{};assert(ResolveDiscoveryRoute(route,&server,provider));const char *error=nullptr;assert(ConnectServer(server,&error,100,provider)<0);assert(std::string(error)==(error_code==7?"External network is busy. Try later.":error_code==8?"Update relay to use external networks.":"External network is unavailable."));checks++;}
+ for(const std::string &bad: {std::string("network=bogus\n"),std::string("network=self\nnetwork=lanywhere-public\n"),std::string(512,'x'),std::string("network=self\n\0tail",18)}){
+  fs::files[ConfigPath]=std::make_shared<fs::Data>(fs::Data{bad});fs::writes=fs::creates=0;DiscoveryRoute route{};assert(!CaptureDiscoveryRoute(&route));char nick[32];Nickname(nick,sizeof(nick));assert(fs::writes==0&&fs::creates==0&&std::string(nick)=="Player");checks++;
+ }
+ config(other.port);for(int mode=0;mode<3;mode++){fs::denied=mode==0;fs::fail_size=mode==1;fs::short_read=mode==2;fs::writes=fs::creates=0;DiscoveryRoute route{};assert(!CaptureDiscoveryRoute(&route));char nick[32];Nickname(nick,sizeof(nick));assert(fs::writes==0&&fs::creates==0);checks++;}fs::denied=fs::fail_size=fs::short_read=false;
+ config(other.port);fs::files["sdmc:/lanywhere/config.ini.bak"]=fs::files[ConfigPath];fs::files.erase(ConfigPath);DiscoveryRoute recovered{};assert(CaptureDiscoveryRoute(&recovered)&&std::string(recovered.provider)=="lanywhere-public");checks++;
+ std::printf("Actual native discovery/config/join slices: %u scenarios passed; no upstream network used.\n",checks);
+}

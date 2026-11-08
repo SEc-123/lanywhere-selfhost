@@ -1,0 +1,18 @@
+{
+  "name": "lanywhere-selfhost",
+  "version": "0.4.7",
+  "private": true,
+  "description": "Self-hosted public multiplayer relay and Switch client, based on LANywhere",
+  "license": "GPL-2.0-only",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server/relay/server.js --port 11460",
+    "test": "node scripts/test.mjs",
+    "test:relay": "node server/relay/test.js",
+    "test:public": "node server/relay/test-public-e2e.js",
+    "test:safety": "node server/relay/test-public-safety.js",
+    "test:bridge": "node server/relay/test-lanplay.js"
+  }
+}

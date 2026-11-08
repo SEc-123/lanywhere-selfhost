@@ -1,0 +1,229 @@
+#include <assert.h>
+#include <stdio.h>
+#include <stdatomic.h>
+#include <string.h>
+#include "switch.h"
+#include "lobby_model.h"
+#include "relay_config.h"
+#define TR(es,en) (en)
+#define ListConnecting (-1)
+#define ListUnavailable (-2)
+#define HidNpadButton_AnyDown (1ULL << 15)
+#define HidNpadButton_AnyUp (1ULL << 14)
+#define HidNpadButton_AnyLeft (1ULL << 16)
+#define HidNpadButton_AnyRight (1ULL << 17)
+#define TOUCH_CARD (1ULL << 62)
+#define TOUCH_NETWORK_CHOICE (1ULL << 61)
+/* SOURCE_PAGE_LIMIT */
+/* SOURCE_STATUS */
+/* SOURCE_VIEW */
+/* SOURCE_PREDICATES */
+/* SOURCE_CLEAN_NICKNAME */
+
+typedef struct { int create, join, leave, cancel, quick, select, launch, public_write, nickname_write, provider_write;
+    int ask_code, page, draw, busy, write_error, sleep, language; } Calls;
+static Calls calls;
+static bool g_guide_open, g_zh, g_es, g_language_save_failed;
+static atomic_bool g_inventory_running;
+static int g_guide_page;
+static LobbyRoomId g_touched_room;
+static bool accept_code = true, save_ok = true, launch_ok = true;
+static unsigned checks;
+static u64 now_ms(void) { return 10000; }
+static void svcSleepThread(u64 nanoseconds) { (void)nanoseconds; calls.sleep++; }
+static void draw(const View *v) { (void)v; calls.draw++; }
+static void draw_busy(const char *s) { (void)s; calls.busy++; }
+static int guide_page_count(void) { return 4; }
+static void switch_language(void) { g_zh = !g_zh; calls.language++; }
+static void cancel_match(View *v) { calls.cancel++; v->match.mode = LobbyManual; }
+static void start_quick(View *v) { calls.quick++; v->match.mode = LobbyQuick; }
+static void select_room(View *v) { calls.select++; assert(v->selection.code[0]); }
+static bool open_selected_game(View *v) { (void)v; calls.launch++; return launch_ok; }
+static const void *local_game_info(const LobbyGroup *g) { return launch_ok ? g : NULL; }
+static void restart_group_list(u32 offset, bool available) { (void)offset; (void)available; calls.page++; }
+static void restart_group_list_on_network(u32 offset, bool available, const char *provider) { (void)offset; (void)available; (void)provider; calls.page++; }
+static void lanywhere_leave(void) { calls.leave++; }
+static Result lanywhere_create(u64 game, const char *nickname) { assert(game == 0); (void)nickname; calls.create++; return 0; }
+static Result lanywhere_join(u64 game, const char *code, const char *nickname) { assert(game == 0); assert(strlen(code) == 6); (void)nickname; calls.join++; return 0; }
+static bool ask_code(char *out, size_t size) { calls.ask_code++; snprintf(out,size,"ABC234"); return accept_code; }
+static bool ask_nickname(const char *current, char *out, size_t size) { (void)current; (void)out; (void)size; return false; }
+static bool ensure_config_dir(void) { return true; }
+bool relay_config_save_public(const char *path, bool enabled) { (void)path; (void)enabled; calls.public_write++; return save_ok; }
+bool relay_config_save_nickname(const char *path, const char *nickname) { (void)path; (void)nickname; calls.nickname_write++; return save_ok; }
+bool relay_config_save_provider(const char *path, const char *provider) { (void)path; (void)provider; calls.provider_write++; return save_ok; }
+static void lanywhere_nickname(char *out, size_t size) { snprintf(out,size,"Test"); }
+static void config_write_error(View *v) { (void)v; calls.write_error++; }
+
+static int step(View *target, u64 down) {
+    View v = *target;
+    int phase = 0, card = -1;
+    u64 now = now_ms(), last_draw = 0;
+    bool dirty = false, thread_ok = true;
+    const char *nick = "";
+    u32 page_offsets[MAX_PAGE_HISTORY] = {0};
+    do {
+        phase = 1;
+/* SOURCE_PLUS */
+        phase = 2;
+/* SOURCE_GUIDE */
+/* SOURCE_SELECTION */
+        phase = 3;
+/* SOURCE_BUSINESS */
+        phase = 4;
+    } while (0);
+    *target = v;
+    return phase;
+}
+
+// Error-screen touch handling uses the actual main.c functions too. Graphics,
+// pad input and the outer applet loop are dependencies, not duplicate routes.
+typedef struct { int unused; } PadState;
+typedef struct { int x,y,w,h; u64 button; } TouchZone;
+static TouchZone g_zones[24];
+static int g_zone_count, applet_ticks;
+enum { MARGIN=56, FOOTER_Y=648, GFX_W=1280, C_BG_TOP=0, C_BG_BOTTOM=0, C_TEXT=0, C_PANEL=0, C_DIM=0, C_LINE=0, C_WARN=0 };
+static u64 guide_touch_action(int x,int y,int page) { (void)x;(void)y;(void)page;return HidNpadButton_B; }
+/* SOURCE_TOUCH */
+static void gfx_begin(void) {}
+static void gfx_end(void) {}
+static void gfx_clear_gradient(u32 a,u32 b) {(void)a;(void)b;}
+static void gfx_text(int x,int y,int size,u32 color,const char *s) {(void)x;(void)y;(void)size;(void)color;(void)s;}
+static void gfx_text_fit(int x,int y,int size,u32 color,const char *s,int max) {(void)x;(void)y;(void)size;(void)color;(void)s;(void)max;}
+static void guide_draw_language(bool chinese) {(void)chinese;}
+/* SOURCE_LANG_CONTROL */
+static void gfx_round_rect(int x,int y,int w,int h,int r,u32 color) {(void)x;(void)y;(void)w;(void)h;(void)r;(void)color;}
+static void gfx_rect(int x,int y,int w,int h,u32 color) {(void)x;(void)y;(void)w;(void)h;(void)color;}
+static int gfx_button(int x,int y,const char *key,const char *label) {(void)x;(void)y;(void)key;(void)label;return 120;}
+static bool appletMainLoop(void) { return applet_ticks-- > 0; }
+static void padUpdate(PadState *pad) {(void)pad;}
+static u64 padGetButtonsDown(PadState *pad) {(void)pad;return 0;}
+static u64 touch_button(void) {return touch_action_at(1130,680);}
+/* SOURCE_NO_SERVICE */
+
+static View lobby(void) {
+    memset(&calls,0,sizeof(calls)); g_guide_open=false;g_guide_page=0;g_zh=false;g_language_save_failed=false;atomic_store(&g_inventory_running,false);accept_code=true;save_ok=true;launch_ok=true;
+    View v={0};v.sel=-1;v.config_state=RelayConfigReady;v.config.public_groups=true;v.match_available=true;v.status_valid=true;v.capabilities=LOBBY_CAP_RESERVED_MATCH;v.next_page=LOBBY_PAGE_END;
+    strcpy(v.config.provider,"self");
+    return v;
+}
+static int effects(void) {return calls.create+calls.join+calls.leave+calls.cancel+calls.quick+calls.select+calls.launch+calls.public_write+calls.nickname_write+calls.provider_write;}
+static void checked(void) {checks++;}
+static void choose(View *v) {v->count=1;strcpy(v->groups[0].code,"ABC234");v->groups[0].game_id=1;v->selection=lobby_room_id(&v->groups[0]);v->sel=0;}
+
+int main(void) {
+    View v=lobby();step(&v,HidNpadButton_A);assert(effects()==0);checked();
+    v=lobby();choose(&v);step(&v,HidNpadButton_A);assert(calls.select==1&&calls.create==0);checked();
+    v=lobby();strcpy(v.selection.code,"OLD234");step(&v,HidNpadButton_A);assert(effects()==0&&!v.selection.code[0]);checked();
+    v=lobby();choose(&v);step(&v,HidNpadButton_Y);assert(v.private_panel&&!v.selection.code[0]&&v.sel==-1&&effects()==0);checked();
+    v=lobby();v.private_panel=true;step(&v,HidNpadButton_A);assert(calls.create==1&&calls.join==0&&calls.public_write==0);checked();
+    v=lobby();v.private_panel=true;step(&v,HidNpadButton_X);assert(calls.ask_code==1&&calls.join==1&&calls.public_write==0);checked();
+    v=lobby();v.private_panel=true;accept_code=false;step(&v,HidNpadButton_X);assert(calls.ask_code==1&&effects()==0);checked();
+    v=lobby();v.private_panel=true;v.private_room=true;v.st.state=StateInRoom;step(&v,HidNpadButton_B);assert(calls.leave==1&&calls.cancel==0);checked();
+    v=lobby();v.private_panel=true;step(&v,HidNpadButton_B);assert(!v.private_panel&&effects()==0);checked();
+    v=lobby();v.match.mode=LobbyExact;v.match.state=MatchAssigned;assert(step(&v,HidNpadButton_R)==2);assert(g_guide_open&&v.match.mode==LobbyExact&&effects()==0);checked();
+    v=lobby();v.private_panel=true;v.private_room=true;v.st.state=StateInRoom;g_guide_open=true;
+    assert(step(&v,HidNpadButton_B)==2);assert(!g_guide_open&&v.private_room&&effects()==0);checked();
+    const u64 modal_keys[]={HidNpadButton_A,HidNpadButton_X,HidNpadButton_Y,HidNpadButton_L};
+    for(unsigned i=0;i<sizeof(modal_keys)/sizeof(*modal_keys);i++){v=lobby();g_guide_open=true;step(&v,modal_keys[i]);assert(effects()==0&&g_guide_open);checked();}
+    const u64 connect_keys[]={HidNpadButton_A,HidNpadButton_X,HidNpadButton_Y};
+    for(unsigned panel=0;panel<2;panel++)for(unsigned i=0;i<sizeof(connect_keys)/sizeof(*connect_keys);i++){
+        v=lobby();v.st.state=StateConnecting;v.private_panel=panel;step(&v,connect_keys[i]);assert(effects()==0&&v.private_panel==(bool)panel);checked();}
+    for(unsigned room=0;room<2;room++)for(unsigned right=0;right<2;right++){
+        v=lobby();v.private_panel=true;v.private_room=room;v.st.state=room?StateInRoom:StateIdle;v.page_index=1;v.next_page=12;
+        step(&v,right?HidNpadButton_ZR:HidNpadButton_ZL);assert(v.page_index==1&&calls.page==0&&effects()==0);checked();}
+    v=lobby();v.page_index=1;step(&v,HidNpadButton_ZL);assert(v.page_index==0&&calls.page==1);checked();
+    v=lobby();step(&v,HidNpadButton_X);assert(calls.public_write==1&&!v.config.public_groups&&calls.ask_code==0);checked();
+    v=lobby();save_ok=false;step(&v,HidNpadButton_X);assert(calls.public_write==1&&calls.write_error==1&&v.config.public_groups);checked();
+    v=lobby();v.st.state=StateInRoom;step(&v,HidNpadButton_X);assert(effects()==0);checked();
+    for(unsigned i=0;i<sizeof(connect_keys)/sizeof(*connect_keys);i++){
+        v=lobby();v.st.state=StateInRoom;v.st.game_id=1;step(&v,connect_keys[i]);assert(!v.private_panel&&effects()==0);checked();}
+    v=lobby();v.match.mode=LobbyExact;step(&v,HidNpadButton_Y|HidNpadButton_X);assert(!v.private_panel&&effects()==0);checked();
+    v=lobby();v.private_panel=true;v.private_room=true;v.st.state=StateInRoom;g_guide_open=true;
+    assert(step(&v,HidNpadButton_Plus)==1);assert(v.private_room&&g_guide_open&&effects()==0);checked();
+    v=lobby();atomic_store(&g_inventory_running,true);assert(step(&v,HidNpadButton_Plus)==1);
+    assert(calls.busy==1&&effects()==0);checked();
+    v=lobby();v.match.mode=LobbyExact;v.match.state=MatchAssigned;
+    assert(step(&v,HidNpadButton_Plus)==1);assert(v.match.mode==LobbyExact&&v.match.state==MatchAssigned&&effects()==0);checked();
+    v=lobby();v.match.mode=LobbyExact;step(&v,HidNpadButton_B);assert(calls.cancel==1&&calls.leave==0);checked();
+    v=lobby();step(&v,HidNpadButton_L);assert(calls.quick==1);checked();
+    v=lobby();v.capabilities=0;step(&v,HidNpadButton_L);assert(calls.quick==0);checked();
+    v=lobby();v.capabilities=0;choose(&v);step(&v,HidNpadButton_A);assert(v.external_confirm&&calls.select==0&&calls.launch==0);checked();
+    step(&v,HidNpadButton_A);assert(calls.launch==1&&calls.select==0);checked();
+    v=lobby();v.capabilities=0;choose(&v);step(&v,HidNpadButton_A);step(&v,HidNpadButton_B);assert(!v.external_confirm&&calls.select==0&&calls.launch==0);checked();
+    v=lobby();v.capabilities=0;choose(&v);launch_ok=false;step(&v,HidNpadButton_A);
+    assert(v.external_confirm&&strstr(v.message,"HOME")&&calls.launch==0&&calls.select==0);checked();
+    v=lobby();step(&v,HidNpadButton_StickL);assert(v.provider_panel&&calls.provider_write==0);checked();
+    step(&v,TOUCH_NETWORK_CHOICE|1);assert(!v.provider_panel&&calls.provider_write==1&&!strcmp(v.config.provider,"lanywhere-public")&&v.capabilities==0&&calls.page==1);checked();
+    for(int provider=2;provider<LOBBY_PROVIDER_COUNT;provider++){
+        v=lobby();step(&v,HidNpadButton_StickL);step(&v,TOUCH_NETWORK_CHOICE|(u64)provider);
+        assert(!v.provider_panel&&calls.provider_write==1&&!strcmp(v.config.provider,lobby_provider_id(provider)));checked();
+        v=lobby();strcpy(v.config.provider,lobby_provider_id(provider));v.private_panel=true;
+        step(&v,HidNpadButton_A);step(&v,HidNpadButton_X);assert(calls.create==0&&calls.join==0&&calls.ask_code==0);checked();
+        v=lobby();strcpy(v.config.provider,lobby_provider_id(provider));step(&v,HidNpadButton_Y);step(&v,HidNpadButton_L);
+        assert(!v.private_panel&&calls.quick==0);checked();
+        v=lobby();strcpy(v.config.provider,lobby_provider_id(provider));choose(&v);step(&v,HidNpadButton_A);
+        assert(v.external_confirm&&calls.select==0&&calls.launch==0);checked();
+    }
+    v=lobby();v.provider_panel=true;v.private_panel=true;step(&v,TOUCH_NETWORK_CHOICE|2);
+    assert(!v.provider_panel&&!v.private_panel&&!strcmp(v.config.provider,"lanplay-nl"));checked();
+    v=lobby();step(&v,HidNpadButton_StickL);
+    for(int i=0;i<6;i++)step(&v,HidNpadButton_AnyDown);
+    assert(v.provider_choice==LOBBY_PROVIDER_COUNT-1);step(&v,HidNpadButton_A);
+    assert(!strcmp(v.config.provider,"lanplay-cn-shanghai")&&calls.provider_write==1);checked();
+    v=lobby();step(&v,HidNpadButton_StickL);
+    for(int i=0;i<3;i++)step(&v,HidNpadButton_AnyDown);
+    step(&v,HidNpadButton_AnyRight);assert(v.provider_choice==7);
+    step(&v,HidNpadButton_AnyDown);assert(v.provider_choice==9);checked();
+    v=lobby();step(&v,HidNpadButton_StickL);
+    for(int i=0;i<5;i++)step(&v,HidNpadButton_AnyDown);
+    step(&v,HidNpadButton_AnyRight);assert(v.provider_choice==11);
+    step(&v,HidNpadButton_AnyDown);assert(v.provider_choice==12);
+    step(&v,HidNpadButton_AnyUp);assert(v.provider_choice==10);checked();
+    for(int target=1;target<LOBBY_PROVIDER_COUNT;target++){
+        v=lobby();step(&v,HidNpadButton_StickL);
+        for(int row=0;row<target/2;row++)step(&v,HidNpadButton_AnyDown);
+        if(target%2)step(&v,HidNpadButton_AnyRight);
+        assert(v.provider_choice==target);step(&v,HidNpadButton_A);
+        assert(!strcmp(v.config.provider,lobby_provider_id(target))&&calls.provider_write==1);checked();
+    }
+    v=lobby();step(&v,HidNpadButton_StickL);step(&v,HidNpadButton_B);
+    assert(!v.provider_panel&&calls.provider_write==0&&!strcmp(v.config.provider,"self"));checked();
+    v=lobby();step(&v,HidNpadButton_StickL);save_ok=false;step(&v,TOUCH_NETWORK_CHOICE|1);assert(v.provider_panel&&calls.provider_write==1&&!strcmp(v.config.provider,"self")&&calls.page==0);checked();
+    v=lobby();v.st.state=StateInRoom;step(&v,HidNpadButton_StickL);assert(!v.provider_panel&&calls.provider_write==0);checked();
+    v=lobby();v.match.mode=LobbyQuick;step(&v,HidNpadButton_StickL);assert(!v.provider_panel&&calls.provider_write==0);checked();
+    for(int state=RelayConfigInvalid;state<=RelayConfigFileError;state++) {
+        v=lobby();v.config_state=(RelayConfigState)state;choose(&v);
+        step(&v,HidNpadButton_StickL);
+        assert(!strcmp(v.message,state==RelayConfigInvalid?"Invalid network settings":"Cannot read network settings"));
+        step(&v,HidNpadButton_X);step(&v,HidNpadButton_Y);step(&v,HidNpadButton_L);step(&v,HidNpadButton_A);step(&v,HidNpadButton_Minus);
+        assert(!v.provider_panel&&!v.private_panel&&calls.provider_write==0&&calls.public_write==0&&calls.nickname_write==0&&calls.quick==0&&calls.select==0);checked();
+    }
+    v=lobby();v.private_panel=true;step(&v,HidNpadButton_L);assert(effects()==0);checked();
+    v=lobby();step(&v,HidNpadButton_Y|HidNpadButton_A);assert(v.private_panel&&effects()==0);checked();
+    v=lobby();g_guide_open=true;step(&v,HidNpadButton_ZL);assert(g_guide_page==0);checked();
+    v=lobby();g_guide_open=true;g_guide_page=3;step(&v,HidNpadButton_ZR);assert(g_guide_page==3);checked();
+    v=lobby();v.private_panel=true;g_guide_open=true;step(&v,HidNpadButton_ZR);assert(g_guide_page==1&&v.private_panel&&effects()==0);checked();
+    v=lobby();g_guide_open=true;applet_ticks=2;PadState pad={0};no_service(&pad,false);
+    assert(!g_guide_open&&calls.sleep==0&&touch_action_at(1130,680)==HidNpadButton_Plus);checked();
+    v=lobby();g_guide_open=true;applet_ticks=2;no_service(&pad,true);assert(!g_guide_open&&calls.sleep==0);checked();
+    assert(touch_action_at(1140,60)==HidNpadButton_StickR);checked();
+    for(unsigned state=0;state<4;state++){
+        v=lobby();
+        if(state==0)g_guide_open=true;
+        if(state==1){v.private_panel=true;v.private_room=true;v.st.state=StateInRoom;}
+        if(state==2){v.match.mode=LobbyExact;v.match.state=MatchAssigned;}
+        if(state==3){v.st.state=StateConnecting;}
+        const View original=v;const bool was_guide=g_guide_open;
+        assert(step(&v,HidNpadButton_StickR|HidNpadButton_A)==1);
+        assert(calls.language==1&&g_zh&&effects()==0&&g_guide_open==was_guide);
+        assert(v.private_room==original.private_room&&v.private_panel==original.private_panel&&v.match.mode==original.match.mode&&v.st.state==original.st.state);checked();
+        step(&v,HidNpadButton_StickR);assert(calls.language==2&&!g_zh&&effects()==0);checked();
+    }
+    char nick[64];assert(clean_nickname("汉汉汉汉汉汉汉汉汉汉",nick,sizeof(nick))&&strlen(nick)==30);checked();
+    assert(!clean_nickname("汉汉汉汉汉汉汉汉汉汉汉",nick,sizeof(nick)));checked();
+    assert(clean_nickname("AB",nick,sizeof(nick))&&!strcmp(nick,"AB"));checked();
+    assert(!clean_nickname("A",nick,sizeof(nick)));checked();
+    (void)g_zh;(void)g_es;
+    printf("Actual main.c slices: %u input/touch/nickname scenarios passed.\n",checks);
+    return 0;
+}

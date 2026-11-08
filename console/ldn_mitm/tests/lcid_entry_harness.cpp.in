@@ -1,0 +1,135 @@
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <vector>
+#include <arpa/inet.h>
+#include "ldn_types.hpp"
+#include "lcid_policy.hpp"
+#include "public_scan_pages.hpp"
+using Result=int;
+#define R_FAILED(x) ((x)!=0)
+#define R_SUCCEEDED(x) ((x)==0)
+#define R_TRY(x) do{Result r=(x);if(r)return r;}while(0)
+#define MAKERESULT(m,d) ((m)*1000+(d))
+#define LogFormat(...) ((void)0)
+#define LogHex(...) ((void)0)
+static int effects=0,lookups=0,error_kind=0,match_calls=0,page_calls=0,create_race=0,leaves=0,physical_calls=0,physical_connects=0;
+static bool cache_open=true,flip_route=false,quick=false;
+static std::vector<u8> cache_bytes;
+static u64 seen_create=0,seen_join=0,seen_scan=0,seen_connect=0;
+static ams::mitm::ldn::NetworkInfo offered{},published{};
+static ams::mitm::ldn::NetworkId connected_id{};
+static bool have_offer=false;
+namespace fs {using FileHandle=int;constexpr int OpenMode_Read=1;
+Result OpenFile(int*f,const char*path,int){++lookups;assert(std::strcmp(path,GAME_CACHE_PATH)==0);*f=1;return cache_open?0:1;}
+Result GetFileSize(s64*s,int){*s=cache_bytes.size();return 0;}
+Result ReadFile(size_t*actual,int,s64 at,void*out,size_t n){if(at<0||size_t(at)>cache_bytes.size()||n>cache_bytes.size()-at)return 1;std::memcpy(out,cache_bytes.data()+at,n);*actual=n;return 0;}
+void CloseFile(int){}
+}
+namespace util {void Strlcpy(char*out,const char*in,size_t n){std::snprintf(out,n,"%s",in);}}
+namespace ams::os {void GenerateRandomBytes(void*out,size_t n){std::memset(out,0x45,n);}}
+void svcSleepThread(long){}
+extern "C" int connect(int,const sockaddr*,socklen_t){++effects;++physical_connects;return 0;}
+namespace ams::mitm::lanywhere {
+/* ACTUAL_ROUTES */
+static GameRoute current{};
+constexpr int CodeLength=6,GroupPageEnd=-1;
+struct MatchJoinAttempt {u8 ticket[16];};
+enum class MatchScanResult {Manual,Empty,Assigned};
+enum class LdnMsg {Scan};constexpr u8 AllMembers=255;
+int ResultRelayFailed(){return 450;}
+bool CaptureGameRoute(GameRoute*out){*out=current;return true;}
+bool GameRouteStillCurrent(const GameRoute&r){return r.room_epoch==current.room_epoch&&r.discovery.ipv4==current.discovery.ipv4&&r.discovery.port==current.discovery.port&&!std::strcmp(r.discovery.provider,current.discovery.provider);}
+void ReportGameNetworkError(bool unavailable){error_kind=unavailable?1:2;}
+void ReportGameRouteChanged(){error_kind=3;}
+void Log(const char*,...){}
+/* ACTUAL_CACHE */
+bool MatchArmed(){return quick;}void CancelMatch(){quick=false;}
+MatchScanResult ScanMatch(const ldn::ScanFilter&f,ldn::NetworkInfo*,const DiscoveryRoute*){++match_calls;seen_scan=f.networkId.intentId.localCommunicationId;return quick?MatchScanResult::Empty:MatchScanResult::Manual;}
+bool InRoom(){return current.room_epoch!=0;}
+bool SendControl(u8,LdnMsg,const void*,size_t){++effects;return true;}
+int FindGroupsFilteredPage(const ldn::ScanFilter&f,u32 offset,u32*next,void(*found)(const char*,const void*,void*),void*user,const DiscoveryRoute*r){++effects;++page_calls;assert(offset==0);assert(!std::strcmp(r->provider,current.discovery.provider));seen_scan=f.networkId.intentId.localCommunicationId;*next=UINT32_MAX;if(have_offer)found("ABCDEF",&offered,user);return have_offer?1:0;}
+Result CreateRoom(u64 id,const DiscoveryRoute*r,GameRoute*joined){++effects;assert(!std::strcmp(r->provider,current.discovery.provider));seen_create=id;current.room_epoch=1;current.room_token=42;*joined=current;if(create_race){current.room_epoch++;if(create_race==2)current.room_token++;}return 0;}
+Result JoinRoom(const char*,u64 id,const DiscoveryRoute*r,GameRoute*joined){++effects;assert(!std::strcmp(r->provider,current.discovery.provider));seen_join=id;current.room_epoch=1;current.room_token=42;*joined=current;return 0;}
+Result JoinMatch(const ldn::NetworkInfo&info,u16,MatchJoinAttempt*){++effects;seen_join=info.networkId.intentId.localCommunicationId;current.room_epoch=1;return 0;}
+bool FinishMatch(const MatchJoinAttempt&,bool){return true;}
+void LeaveRoom(){++leaves;current.room_epoch=current.room_token=0;}
+void LeaveGameRoom(const GameRoute&owned){if(current.room_token==owned.room_token)LeaveRoom();}
+void LeaveMatchRoom(const MatchJoinAttempt&){LeaveRoom();}
+constexpr size_t MatchFilterSize=96;constexpr u32 KnownScanFlags=0x37;
+void put64(u8*p,u64 n){gi_put64(p,n);}void put32(u8*p,u32 n){gi_put32(p,n);}void put16(u8*p,u16 n){p[0]=n;p[1]=n>>8;}
+static int identity_lookups=0;
+GameCacheResult GameIdentityCacheLookup(u64,u64,GameIdentity*out){++identity_lookups;out->application_id=42;std::strcpy(out->english,"Untrusted sentinel match");std::strcpy(out->chinese,"本地缓存");return GameCacheFound;}
+/* ACTUAL_RELAY */
+}
+namespace ams::mitm::ldn {
+constexpr int ModuleID=0xfd,LdnModuleId=0xcb;
+enum class LANPacketType {Scan,Connect};
+struct MacLess {bool operator()(const MacAddress&a,const MacAddress&b)const{return std::memcmp(&a,&b,sizeof(a))<0;}};
+struct FakeUdp {std::map<MacAddress,NetworkInfo,MacLess>scanResults;int sendBroadcast(LANPacketType){++effects;++physical_calls;if(have_offer)scanResults.emplace(offered.common.bssid,offered);return 0;}};
+struct FakeTcp {int getFd(){return -1;}int sendPacket(LANPacketType,const void*,size_t){++effects;return 0;}};
+class LANDiscovery {public:
+ u64 hostProgramId=0,loggedWireLcid=0,loggedCanonicalLcid=0;bool loggedLcid=false;
+ std::mutex scanResultsMutex;std::unique_ptr<FakeUdp>udp{new FakeUdp};std::unique_ptr<FakeTcp>tcp{new FakeTcp};
+ struct PublicGroup{MacAddress bssid;char code[8];lanywhere::DiscoveryRoute route;};
+ struct PublicScanContext{LANDiscovery*self;const ScanFilter*filter;lanywhere::DiscoveryRoute route;};
+ std::array<PublicGroup,8>publicGroups{};size_t publicGroupCount=0;bool lastScanWasMatch=false,haveScanRoute=false,physicalScanActive=false,autoRoom=false,ownsMatchRoom=false;
+ lanywhere::GameRoute lastScanRoute{},ownedGameRoute{};lanywhere::MatchJoinAttempt matchRoom{};
+ CommState state=CommState::AccessPoint;int hostMember=-1;u16 listenPort=11452;NetworkInfo networkInfo{};
+ Result resolveGameLcid(u64*,const lanywhere::GameRoute&);
+ Result scan(NetworkInfo*,u16*,ScanFilter);static void onPublicGroup(const char*,const void*,void*);
+ Result createNetwork(const SecurityConfig*,const UserConfig*,const NetworkConfig*);
+ Result connect(const NetworkInfo*,UserConfig*,u16);
+ Result connectRoom(const NetworkInfo*n,UserConfig*,u16,const lanywhere::MatchJoinAttempt* = nullptr,const lanywhere::GameRoute* = nullptr);
+ void leaveAutoRoom();
+ Result initTcp(bool){++effects;return 0;}Result initNetworkInfo(){networkInfo={};return 0;}
+ Result getNodeInfo(NodeInfo*n,const UserConfig*,u16 version){n->localCommunicationVersion=version;return 0;}
+ void setState(CommState s){state=s;}void initNodeStateChange(){}void updateNodes(){published=networkInfo;}
+ void onDisconnectFromHost(){}
+};
+Result LANDiscovery::connectRoom(const NetworkInfo*n,UserConfig*,u16,const lanywhere::MatchJoinAttempt*,const lanywhere::GameRoute*r){++effects;seen_connect=n->networkId.intentId.localCommunicationId;connected_id=n->networkId;assert(r);return 0;}
+/* ACTUAL_ENTRIES */
+}
+using namespace ams::mitm;using namespace ams::mitm::ldn;
+GameCacheRecord make_record(u64 program,u64 first){GameCacheRecord r{};r.application_id=program;for(auto &id:r.local_communication_ids)id=program;r.local_communication_ids[0]=first;std::strcpy(r.names.english,"Test title");std::strcpy(r.names.chinese,"测试标题");return r;}
+void encode(std::vector<GameCacheRecord> records){cache_bytes.assign(64+records.size()*328,0);game_cache_header(cache_bytes.data(),records.size(),1);for(size_t i=0;i<records.size();i++)game_cache_encode_record(&records[i],cache_bytes.data()+64+i*328);GameIdentitySha256 h;gi_sha256_init(&h);gi_sha256_update(&h,cache_bytes.data(),32);gi_sha256_update(&h,cache_bytes.data()+64,cache_bytes.size()-64);gi_sha256_final(&h,cache_bytes.data()+32);}
+void reset(const char*provider="self",bool active=false){effects=lookups=error_kind=match_calls=page_calls=create_race=leaves=physical_calls=physical_connects=0;cache_open=true;flip_route=quick=false;seen_create=seen_join=seen_scan=seen_connect=0;have_offer=false;offered=published={};lanywhere::current={};auto&r=lanywhere::current;r.discovery.ipv4=1;r.discovery.port=2;r.discovery.public_enabled=true;std::strcpy(r.discovery.provider,provider);r.room_epoch=active?9:0;r.room_token=active?33:0;}
+int main(){
+ constexpr u64 dying=0x01008c8012920000ULL,violet=0x01008f6008c5e000ULL,shared=0x0100a3d008c5c000ULL;
+ auto dr=make_record(dying,dying),vr=make_record(violet,shared);SecurityConfig sec{};UserConfig user{};NetworkConfig cfg{};cfg.intentId.localCommunicationId=UINT64_MAX;cfg.intentId.sceneId=41;cfg.nodeCountMax=4;cfg.localCommunicationVersion=7;
+ for(auto pair:{std::pair<u64,u64>{dying,dying},{violet,shared}}){reset();encode({dr,vr});LANDiscovery game;game.hostProgramId=pair.first;assert(game.createNetwork(&sec,&user,&cfg)==0);assert(seen_create==pair.second&&published.networkId.intentId.localCommunicationId==pair.second&&published.networkId.intentId.sceneId==41);assert(cfg.intentId.localCommunicationId==UINT64_MAX);assert(!std::memcmp(reinterpret_cast<u8*>(&published.networkId.intentId)+8,reinterpret_cast<u8*>(&cfg.intentId)+8,8));}
+ for(const char*provider:{"lanywhere-public","lanplay-cn-jax"}){reset(provider);encode({dr,vr});LANDiscovery game;game.hostProgramId=violet;assert(game.createNetwork(&sec,&user,&cfg)==0);assert(seen_create==UINT64_MAX&&published.networkId.intentId.localCommunicationId==UINT64_MAX&&game.loggedCanonicalLcid==shared);}
+ // Missing, corrupt, ambiguous, wrong exact ID, default0/defaultFFFF fail before any network side effect.
+ for(int bad=0;bad<6;bad++){reset();auto rec=vr;if(bad==4)rec.local_communication_ids[0]=0;if(bad==5)rec.local_communication_ids[0]=UINT64_MAX;encode({rec});if(bad==0)cache_open=false;if(bad==1)cache_bytes[32]^=1;if(bad==2){auto other=vr;other.local_communication_ids[0]=dying;encode({vr,other});}LANDiscovery game;game.hostProgramId=bad==3?violet+1:violet;assert(game.createNetwork(&sec,&user,&cfg)!=0&&effects==0&&error_kind==1);ScanFilter f{};f.flag=1;f.networkId.intentId.localCommunicationId=UINT64_MAX;NetworkInfo out[8]{};u16 count=8;assert(game.scan(out,&count,f)!=0&&effects==0&&count==0);NetworkInfo n{};n.ldn.nodeCount=1;n.networkId.intentId.localCommunicationId=UINT64_MAX;assert(game.connect(&n,&user,7)!=0&&effects==0);}
+ for(bool external:{false,true}){reset(external?"lanplay-cn-jax":"self");encode({dr,vr});LANDiscovery game;game.hostProgramId=violet;ScanFilter f{};f.flag=1|32;f.networkId.intentId.localCommunicationId=UINT64_MAX;f.networkId.intentId.sceneId=41;have_offer=true;offered.networkId.intentId=f.networkId.intentId;offered.networkId.intentId.localCommunicationId=external?UINT64_MAX:shared;offered.ldn.nodeCount=1;NetworkInfo out[8]{};u16 count=8;assert(game.scan(out,&count,f)==0&&count==1);assert(seen_scan==(external?UINT64_MAX:shared));assert(external?match_calls==0:match_calls==1);assert(game.connect(&out[0],&user,7)==0);assert(seen_join==(external?UINT64_MAX:shared)&&seen_connect==seen_join);}
+ // An unfiltered scan neither looks up nor rewrites its unused sentinel field.
+ reset();cache_open=false;LANDiscovery any;any.hostProgramId=violet;ScanFilter f{};f.networkId.intentId.localCommunicationId=UINT64_MAX;NetworkInfo out[8]{};u16 count=8;assert(any.scan(out,&count,f)==0&&lookups==0&&seen_scan==UINT64_MAX);
+ // Existing private-room identity follows active provider without creating another room.
+ reset("self",true);encode({vr});LANDiscovery private_game;private_game.hostProgramId=violet;assert(private_game.createNetwork(&sec,&user,&cfg)==0&&seen_create==0&&published.networkId.intentId.localCommunicationId==shared);
+ // An App-selected active private room overrides this service's earlier public scan route.
+ reset("lanplay-cn-jax");encode({vr});LANDiscovery old_scan;old_scan.hostProgramId=violet;have_offer=true;offered.ldn.nodeCount=1;offered.networkId.intentId.localCommunicationId=UINT64_MAX;ScanFilter sf{};sf.flag=1;sf.networkId.intentId.localCommunicationId=UINT64_MAX;count=8;assert(old_scan.scan(out,&count,sf)==0&&count==1);std::strcpy(lanywhere::current.discovery.provider,"self");lanywhere::current.room_epoch=8;lanywhere::current.room_token=77;seen_join=0;assert(old_scan.connect(&out[0],&user,7)==0&&seen_join==0&&seen_connect==shared);
+ // Positive explicit alternate stays unchanged; an unauthorized explicit ID fails.
+ reset();encode({vr});LANDiscovery explicit_game;explicit_game.hostProgramId=violet;cfg.intentId.localCommunicationId=violet;assert(explicit_game.createNetwork(&sec,&user,&cfg)==0&&seen_create==violet);
+ reset();encode({vr});LANDiscovery denied;denied.hostProgramId=violet;cfg.intentId.localCommunicationId=dying;assert(denied.createNetwork(&sec,&user,&cfg)!=0&&effects==0&&error_kind==2);
+ reset();cache_open=false;LANDiscovery explicit_missing;explicit_missing.hostProgramId=violet;cfg.intentId.localCommunicationId=violet;assert(explicit_missing.createNetwork(&sec,&user,&cfg)==0&&seen_create==violet);
+ reset();encode({vr});LANDiscovery zero;zero.hostProgramId=violet;cfg.intentId.localCommunicationId=0;assert(zero.createNetwork(&sec,&user,&cfg)!=0&&effects==0&&error_kind==2);
+ // Clean up only our auto-created room on a setup epoch change; retain a replacement room.
+ for(int race:{1,2}){reset();encode({vr});create_race=race;LANDiscovery game;game.hostProgramId=violet;cfg.intentId.localCommunicationId=UINT64_MAX;assert(game.createNetwork(&sec,&user,&cfg)!=0&&!game.autoRoom&&error_kind==3);assert(leaves==(race==1?1:0));assert(race==1?!lanywhere::current.room_token:lanywhere::current.room_token==43);}
+ u8 encoded[96]{};ScanFilter reserved{};reserved.flag=1;reserved.networkId.intentId.localCommunicationId=UINT64_MAX;assert(!lanywhere::MakeMatchFilter(reserved,encoded));reserved.networkId.intentId.localCommunicationId=shared;assert(lanywhere::MakeMatchFilter(reserved,encoded)&&gi_get64(encoded)==shared);
+ lanywhere::GroupSummaryV2 unknown{};unknown.game_id=UINT64_MAX;lanywhere::AddCachedIdentity(unknown);
+ assert(lanywhere::identity_lookups==0&&!unknown.metadata_flags&&!unknown.application_id&&!unknown.title_en[0]);
+ unknown.game_id=shared;lanywhere::AddCachedIdentity(unknown);assert(lanywhere::identity_lookups==1&&unknown.metadata_flags==2);
+ unknown.game_id=UINT64_MAX;std::strcpy(unknown.title_en,"Accurate host metadata");lanywhere::AddCachedIdentity(unknown);
+ assert(lanywhere::identity_lookups==1&&!std::strcmp(unknown.title_en,"Accurate host metadata"));
+ // Public mode is relay-only; no physical broadcast/fallback can mix wire identities.
+ reset();encode({vr});LANDiscovery online;online.hostProgramId=violet;sf.flag=1;sf.networkId.intentId.localCommunicationId=UINT64_MAX;count=8;assert(online.scan(out,&count,sf)==0&&page_calls==1&&physical_calls==0);NetworkInfo unbound{};unbound.ldn.nodeCount=1;unbound.networkId.intentId.localCommunicationId=shared;assert(online.connect(&unbound,&user,7)!=0&&physical_connects==0);
+ // With no active room and public mode off, all physical-LAN values stay raw,
+ // even without a cache. No relay matching, lookup or room operation occurs.
+ for(u64 raw:{UINT64_MAX,u64(0),u64(42)}){reset();cache_open=false;lanywhere::current.discovery.public_enabled=false;LANDiscovery local;local.hostProgramId=violet;cfg.intentId.localCommunicationId=raw;assert(local.createNetwork(&sec,&user,&cfg)==0&&published.networkId.intentId.localCommunicationId==raw&&seen_create==0&&lookups==0);local.state=CommState::Station;sf.flag=1;sf.networkId.intentId.localCommunicationId=raw;have_offer=true;offered.ldn.nodeCount=1;offered.networkId.intentId.localCommunicationId=raw;count=8;assert(local.scan(out,&count,sf)==0&&count==1&&physical_calls==1&&page_calls==0&&match_calls==0&&lookups==0);assert(local.connect(&out[0],&user,7)==0&&physical_connects==1&&seen_join==0&&lookups==0);}
+ std::puts("Actual LCID entry/cache functions: create/scan/connect, target records, legacy wire, private room and six no-network failure cases passed");
+}

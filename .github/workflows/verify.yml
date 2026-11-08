@@ -1,0 +1,27 @@
+name: Verify relay and host utilities
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install host image test dependency
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libturbojpeg0-dev
+      - name: Relay protocol and multiplayer checks
+        run: npm test -- --report "$RUNNER_TEMP/switch-online-tests.json"
+      - name: Shell syntax
+        run: |
+          bash -n scripts/build-macos.sh
+          bash -n scripts/toolchain/build-switch.sh
+          bash -n deploy/install-systemd.sh
+      - name: Release and deployment helper syntax
+        run: python3 -m py_compile scripts/package.py scripts/release-bundle.py scripts/toolchain/verify_switch_build.py deploy/state-backup.py

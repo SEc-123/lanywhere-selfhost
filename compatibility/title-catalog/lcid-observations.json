@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "evidence": {
+    "local_nacp_20261107": {
+      "kind": "limited_nacp_metadata_observation",
+      "source_date": "2026-11-07",
+      "public_records_sha256": "c8cbf21188216c59e7018c8fde77b4d6e01243865c417e729a9757f962476915",
+      "method": "Two selected application records and their ordered NACP local-communication ID arrays were inspected. Only these limited records are included here.",
+      "scope": "A partial observation, not exhaustive LCID identity or current installation status. Unknown additional applications sharing an LCID remain possible."
+    }
+  },
+  "observations": [
+    {
+      "appid": "01008C8012920000",
+      "lcids": [
+        "01008C8012920000",
+        "01008C8012920000",
+        "01008C8012920000",
+        "01008C8012920000",
+        "01008C8012920000",
+        "01008C8012920000",
+        "01008C8012920000",
+        "01008C8012920000"
+      ],
+      "known_ambiguous_lcids": [],
+      "evidence": "local_nacp_20261107"
+    },
+    {
+      "appid": "01008F6008C5E000",
+      "lcids": [
+        "0100A3D008C5C000",
+        "01008F6008C5E000",
+        "01008F6008C5E000",
+        "01008F6008C5E000",
+        "01008F6008C5E000",
+        "01008F6008C5E000",
+        "01008F6008C5E000",
+        "01008F6008C5E000"
+      ],
+      "known_ambiguous_lcids": [
+        "01008F6008C5E000",
+        "0100A3D008C5C000"
+      ],
+      "evidence": "local_nacp_20261107"
+    }
+  ]
+}

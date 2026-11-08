@@ -1,0 +1,171 @@
+#include "tcp_stream_hooks.hpp"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <chrono>
+#include <cstring>
+#include <iostream>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+using u8=uint8_t;using u16=uint16_t;using u32=uint32_t;using u64=uint64_t;using s16=int16_t;using s32=int32_t;using s64=int64_t;using Result=uint32_t;
+using namespace ams::mitm;
+#define R_TRY(x) do {const Result rc=(x);if(rc)return rc;}while(false)
+#define R_SUCCEED() return 0
+#define AMS_ASSERT(x) assert(x)
+static int NativeError(){switch(errno){case EAGAIN:return 11;case EINPROGRESS:return 115;case EALREADY:return 114;case EISCONN:return 106;case ENOTCONN:return 107;case ECONNRESET:return 104;case ECONNREFUSED:return 111;case ETIMEDOUT:return 110;case EBADF:return 9;default:return 22;}}
+struct GameNamespace {
+ std::map<int,int> sockets;int next=1000,virtual_connects=0,command_count[32]{};
+ ~GameNamespace(){for(auto [id,fd]:sockets){(void)id;::close(fd);}}
+ int Real(int id){auto it=sockets.find(id);if(it==sockets.end()){errno=EBADF;return -1;}return it->second;}
+ static u32 Dispatch(void *ctx,u32 command,const void *input,size_t input_size,void *output,size_t output_size,const tcpstream::IpcBuffer *buffers,size_t count){
+  auto &self=*static_cast<GameNamespace*>(ctx);assert(command<32);self.command_count[command]++;
+  struct Raw{int32_t ret,error;uint32_t length;} out{-1,0,0};assert(output_size==8||output_size==12);
+  const auto *ints=static_cast<const int32_t*>(input);const int id=input_size>=4?ints[0]:-1;const int fd=(command==2||command==3||command==5||command==6||command==23)?-1:self.Real(id);
+  auto endpoint=[&](size_t index){tcpstream::Endpoint e{};assert(index<count&&buffers[index].size>=16&&tcpstream::ReadAddress(buffers[index].data,16,&e));return e;};
+  switch(command){
+   case 2:case 3:{assert(input_size==12&&count==0&&ints[0]==2&&ints[1]==1);const int real=::socket(AF_INET,SOCK_STREAM,0);assert(real>=0);int one=1;
+#ifdef SO_NOSIGPIPE
+    ::setsockopt(real,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));
+#endif
+    (void)one;out.ret=self.next++;self.sockets[out.ret]=real;break;}
+   case 12:{assert(input_size==4&&count==1&&buffers[0].output);sockaddr_in a{};socklen_t n=sizeof(a);const int real=::accept(fd,reinterpret_cast<sockaddr*>(&a),&n);if(real>=0){out.ret=self.next++;self.sockets[out.ret]=real;auto raw=tcpstream::MakeAddress({ntohl(a.sin_addr.s_addr),ntohs(a.sin_port)});std::memcpy(buffers[0].data,&raw,std::min(buffers[0].size,sizeof(raw)));out.length=16;}break;}
+   case 13:case 14:{assert(input_size==4&&count==1&&!buffers[0].output);const auto e=endpoint(0);if(command==14&&(e.ip>>16)==0x0a0d)self.virtual_connects++;sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(e.ip);a.sin_port=htons(e.port);out.ret=command==13?::bind(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a)) : ::connect(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a));break;}
+   case 15:case 16:{assert(input_size==4&&output_size==12&&count==1&&buffers[0].output);sockaddr_in a{};socklen_t n=sizeof(a);out.ret=command==15?::getpeername(fd,reinterpret_cast<sockaddr*>(&a),&n): ::getsockname(fd,reinterpret_cast<sockaddr*>(&a),&n);if(out.ret==0){auto raw=tcpstream::MakeAddress({ntohl(a.sin_addr.s_addr),ntohs(a.sin_port)});std::memcpy(buffers[0].data,&raw,std::min(buffers[0].size,sizeof(raw)));out.length=16;}break;}
+   case 17:{assert(input_size==12&&output_size==12&&count==1&&buffers[0].output&&ints[1]==0xffff);if(ints[2]==0x1008){int value=0;socklen_t n=sizeof(value);out.ret=::getsockopt(fd,SOL_SOCKET,SO_TYPE,&value,&n);std::memcpy(buffers[0].data,&value,4);out.length=4;}else if(ints[2]==0x1005||ints[2]==0x1006){assert(buffers[0].size==16);timeval t{};socklen_t n=sizeof(t);out.ret=::getsockopt(fd,SOL_SOCKET,ints[2]==0x1005?SO_SNDTIMEO:SO_RCVTIMEO,&t,&n);const int64_t values[2]={t.tv_sec,t.tv_usec};std::memcpy(buffers[0].data,values,16);out.length=16;}else {out.ret=-1;errno=EINVAL;}break;}
+   case 18:assert(input_size==8);out.ret=::listen(fd,ints[1]);break;
+   case 20:{assert(input_size==12);if(ints[1]==3){const int f=::fcntl(fd,F_GETFL);out.ret=f<0?-1:((f&O_NONBLOCK)?0x800:0);}else if(ints[1]==4){const int f=::fcntl(fd,F_GETFL);out.ret=::fcntl(fd,F_SETFL,(f&~O_NONBLOCK)|((ints[2]&0x800)?O_NONBLOCK:0));}else if(ints[1]==0){const int real=::dup(fd);if(real>=0){out.ret=self.next++;self.sockets[out.ret]=real;}}else{out.ret=-1;errno=EINVAL;}break;}
+   case 21:{assert(input_size==12&&count==1&&!buffers[0].output&&ints[1]==0xffff);if(ints[2]==0x1005||ints[2]==0x1006){assert(buffers[0].size==16);const auto *v=static_cast<const int64_t*>(buffers[0].data);timeval t{static_cast<time_t>(v[0]),static_cast<suseconds_t>(v[1])};out.ret=::setsockopt(fd,SOL_SOCKET,ints[2]==0x1005?SO_SNDTIMEO:SO_RCVTIMEO,&t,sizeof(t));}else if(ints[2]==0x10000)out.ret=0;else{errno=EINVAL;out.ret=-1;}break;}
+   case 22:assert(input_size==8);out.ret=::shutdown(fd,ints[1]);break;
+   case 23:assert(input_size==4);for(auto [key,value]:self.sockets){(void)key;::shutdown(value,ints[0]);}out.ret=0;break;
+   case 29:case 30:assert(false);break;
+   case 24:{assert(input_size==4&&count==1&&!buffers[0].output);
+#ifdef MSG_NOSIGNAL
+    out.ret=::send(fd,buffers[0].data,buffers[0].size,MSG_NOSIGNAL);
+#else
+    out.ret=::send(fd,buffers[0].data,buffers[0].size,0);
+#endif
+    break;}
+   case 25:assert(input_size==4&&count==1&&buffers[0].output);out.ret=::recv(fd,buffers[0].data,buffers[0].size,0);break;
+   case 26:assert(input_size==4);out.ret=::close(fd);if(out.ret==0)self.sockets.erase(id);break;
+   case 27:{assert(input_size==16);const auto *d=static_cast<const tcpstream::NativeDuplicateData*>(input);assert(!d->padding&&!d->reserved);const int real=::dup(fd);if(real>=0){out.ret=self.next++;self.sockets[out.ret]=real;}break;}
+   case 6:{assert(input_size==8&&count==2&&!buffers[0].output&&buffers[1].output);const size_t n=*static_cast<const uint32_t*>(input);assert(n<=64&&buffers[0].size==n*8&&buffers[1].size==n*8);const auto *in=static_cast<const tcpstream::NativePollFd*>(buffers[0].data);auto *result=static_cast<tcpstream::NativePollFd*>(buffers[1].data);pollfd host[64]{};for(size_t i=0;i<n;i++)host[i]={self.Real(in[i].fd),in[i].events,0};out.ret=::poll(host,n,ints[1]);for(size_t i=0;i<n;i++)result[i]={in[i].fd,in[i].events,host[i].revents};break;}
+   case 5:{assert(input_size==32&&count==6);const auto &d=*static_cast<const tcpstream::NativeSelectData*>(input);fd_set sets[3];for(auto &s:sets)FD_ZERO(&s);int maximum=0;for(int n=0;n<d.nfds;n++)for(int k=0;k<3;k++)if(buffers[k].size&&(static_cast<const uint8_t*>(buffers[k].data)[n/8]&(1<<(n%8)))){const int real=self.Real(n);assert(real>=0);FD_SET(real,&sets[k]);maximum=std::max(maximum,real+1);}timeval t{static_cast<time_t>(d.seconds),static_cast<suseconds_t>(d.microseconds)};out.ret=::select(maximum,&sets[0],&sets[1],&sets[2],d.null_timeout?nullptr:&t);for(int k=0;k<3;k++){if(buffers[k+3].size)std::memset(buffers[k+3].data,0,buffers[k+3].size);for(int n=0;n<d.nfds;n++)if(buffers[k].size&&(static_cast<const uint8_t*>(buffers[k].data)[n/8]&(1<<(n%8)))&&FD_ISSET(self.Real(n),&sets[k]))static_cast<uint8_t*>(buffers[k+3].data)[n/8]|=1<<(n%8);}break;}
+   default:assert(false);
+  }
+  if(out.ret<0)out.error=NativeError();
+  std::memcpy(output,&out,output_size);return 0;
+ }
+};
+struct Service {GameNamespace *game;};
+struct SfBufferAttrs{u32 attr0=0,attr1=0,attr2=0,attr3=0,attr4=0,attr5=0,attr6=0,attr7=0;};struct SfBuffer{const void *ptr;size_t size;};
+struct SfDispatchParams{SfBufferAttrs buffer_attrs{};SfBuffer buffers[8]{};};
+constexpr u32 SfBufferAttr_HipcAutoSelect=32,SfBufferAttr_In=1,SfBufferAttr_Out=2,SfBufferAttr_HipcMapAlias=4;
+static u32 serviceDispatchImpl(Service *service,u32 command,const void *in,u32 in_size,void *out,u32 out_size,SfDispatchParams params){
+ u32 attrs[8];std::memcpy(attrs,&params.buffer_attrs,sizeof(attrs));tcpstream::IpcBuffer buffers[8]{};size_t n=0;for(size_t i=0;i<8;i++)if(attrs[i]){assert(i==n++);assert((attrs[i]&32)||(attrs[i]&4));buffers[i]={const_cast<void*>(params.buffers[i].ptr),params.buffers[i].size,(attrs[i]&2)!=0};}return GameNamespace::Dispatch(service->game,command,in,in_size,out,out_size,buffers,n);
+}
+#define serviceDispatchInOut(s,c,i,o,...) serviceDispatchImpl((s),(c),&(i),sizeof(i),&(o),sizeof(o),SfDispatchParams{__VA_ARGS__})
+namespace ams {
+struct TimeSpan{int64_t us;TimeSpan ToTimeSpan()const{return *this;}static TimeSpan FromMilliSeconds(int64_t n){return {n*1000};}int64_t GetMicroSeconds()const{return us;}int64_t GetMilliSeconds()const{return us/1000;}};
+namespace os {using SdkMutex=std::mutex;struct Tick{std::chrono::steady_clock::time_point at;};static Tick GetSystemTick(){return {std::chrono::steady_clock::now()};}static TimeSpan operator-(Tick a,Tick b){return {std::chrono::duration_cast<std::chrono::microseconds>(a.at-b.at).count()};}static void SleepThread(TimeSpan t){std::this_thread::sleep_for(std::chrono::microseconds(t.us));}}
+namespace sm {struct Number{u64 value;};struct MitmProcessInfo{Number process_id,program_id;};}
+namespace ncm {using ProgramId=sm::Number;struct ApplicationId{u64 value;static const ApplicationId Start,End;};constexpr bool operator<=(ApplicationId a,ProgramId p){return a.value<=p.value;}constexpr bool operator<=(ProgramId p,ApplicationId a){return p.value<=a.value;}
+/* SDK_PREDICATE */
+}
+namespace sf {template<class T>struct Out{T *p;void SetValue(T n)const{*p=n;}};struct InAutoSelectBuffer{const u8 *p;size_t n;const u8 *GetPointer()const{return p;}size_t GetSize()const{return n;}};struct OutAutoSelectBuffer{u8 *p;size_t n;u8 *GetPointer()const{return p;}size_t GetSize()const{return n;}};using OutMapAliasBuffer=OutAutoSelectBuffer;struct MitmServiceImplBase{std::shared_ptr<Service> m_forward_service;sm::MitmProcessInfo m_client_info;MitmServiceImplBase(std::shared_ptr<Service> &&s,const sm::MitmProcessInfo &i):m_forward_service(std::move(s)),m_client_info(i){}};}
+namespace mitm::lanywhere {static bool InRoom(){return true;}static bool IsVirtual(u32 ip){return (ip>>16)==0x0a0d;}static bool HasData(u16){return false;}static int unavailable=0;static void ReportTcpUnavailable(){unavailable++;}}
+namespace mitm::tcpstream {static thread_local Proxy *selected;Proxy &TestGlobal(){assert(selected);return *selected;}}
+namespace mitm::bsd {
+using namespace ams;struct Out{s32 ret,err;};struct PollFd{s32 fd;s16 events,revents;};static std::mutex g_lock;constexpr s16 PollIn=1,PollRdNorm=0x40;constexpr s32 PollSliceMs=5;constexpr size_t MaxPollFds=64;
+struct SocketStats{bool used=false;int type=0;u16 bound_port=0,peer_port=0;u32 peer_ip=0,sent_packets=0;};static SocketStats *Find(s32,u64,bool){return nullptr;}static void MaybeSummary(){};static void WriteLine(const char*,...){};static const char *FormatAddr(char *out,size_t,const void*,size_t){*out=0;return out;}static void Summary(const SocketStats&,const char*){};constexpr s32 ErrnoAddr=99;struct{int poll_calls=0,poll_ready=0;}g_recv;
+class BsdSpyService:public sf::MitmServiceImplBase {
+public:
+ /* BSD_PREDICATE */
+ BsdSpyService(std::shared_ptr<Service> &&,const sm::MitmProcessInfo &);~BsdSpyService();
+ Result Select(sf::Out<s32>,sf::Out<s32>,tcpstream::NativeSelectData,const sf::InAutoSelectBuffer&,const sf::InAutoSelectBuffer&,const sf::InAutoSelectBuffer&,const sf::OutAutoSelectBuffer&,const sf::OutAutoSelectBuffer&,const sf::OutAutoSelectBuffer&);
+ Result Poll(sf::Out<s32>,sf::Out<s32>,u32,s32,const sf::InAutoSelectBuffer&,const sf::OutAutoSelectBuffer&);
+ Result Accept(sf::Out<s32>,sf::Out<s32>,sf::Out<u32>,s32,const sf::OutAutoSelectBuffer&);
+ Result GetPeerName(sf::Out<s32>,sf::Out<s32>,sf::Out<u32>,s32,const sf::OutAutoSelectBuffer&);
+ Result GetSockName(sf::Out<s32>,sf::Out<s32>,sf::Out<u32>,s32,const sf::OutAutoSelectBuffer&);
+ Result GetSockOpt(sf::Out<s32>,sf::Out<s32>,sf::Out<u32>,s32,s32,s32,const sf::OutAutoSelectBuffer&);
+ Result Shutdown(sf::Out<s32>,sf::Out<s32>,s32,s32);
+ Result DuplicateSocket(sf::Out<s32>,sf::Out<s32>,tcpstream::NativeDuplicateData);
+ Result Read(sf::Out<s32>,sf::Out<s32>,s32,const sf::OutAutoSelectBuffer&);
+ Result SetSockOpt(sf::Out<s32>,sf::Out<s32>,s32,s32,s32,const sf::InAutoSelectBuffer&);
+ Result Connect(sf::Out<s32>,sf::Out<s32>,s32,const sf::InAutoSelectBuffer&);
+ Result Close(sf::Out<s32>,sf::Out<s32>,s32);
+ Result Fcntl(sf::Out<s32>,sf::Out<s32>,s32,s32,s32);
+ Result ShutdownAllSockets(sf::Out<s32>,sf::Out<s32>,s32);
+ Result RecvMMsg(sf::Out<s32>,sf::Out<s32>,tcpstream::NativeRecvMmsgData,const sf::OutMapAliasBuffer&);
+ Result SendMMsg(sf::Out<s32>,sf::Out<s32>,tcpstream::NativeSendMmsgData,const sf::OutMapAliasBuffer&);
+ Result EnsureUdpPort(s32 fd,u16 *port,s32 *error,bool){tcpstream::Forward f(m_forward_service.get()->game,GameNamespace::Dispatch);tcpstream::Endpoint e{};auto r=f.Name(fd,&e);*port=e.port;*error=r.error;return r.ipc;}
+ Result Write(sf::Out<s32>,sf::Out<s32>,s32,const sf::InAutoSelectBuffer&);
+};
+#define Global TestGlobal
+/* ACTUAL_SOURCE */
+#undef Global
+}}
+using ams::mitm::bsd::BsdSpyService;
+struct Link {std::mutex lock;tcpstream::Proxy *peer=nullptr;u32 source=0;bool held=false,enabled=true;std::vector<std::vector<u8>> queue;
+ static bool Send(void *v,u64 epoch,const u8 *bytes,size_t size){auto &x=*static_cast<Link*>(v);std::scoped_lock guard(x.lock);if(!x.enabled)return false;std::vector<u8> copy(bytes,bytes+size);tcpstream::Put32(copy.data(),x.source);if(x.held)x.queue.push_back(std::move(copy));else x.peer->OnFrame(epoch,copy.data(),copy.size());return true;}
+ void Flush(){std::scoped_lock guard(lock);held=false;for(const auto &b:queue)peer->OnFrame(1,b.data(),b.size());queue.clear();}
+ void Disable(){std::scoped_lock guard(lock);enabled=false;}
+};
+static void Until(const std::function<bool()> &f,const char *name){const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(5);while(std::chrono::steady_clock::now()<end){if(f())return;std::this_thread::sleep_for(std::chrono::milliseconds(1));}std::cerr<<name<<'\n';std::abort();}
+int main(){
+ using namespace ams;
+ const std::pair<u64,bool> boundaries[]={{0,false},{0x010000000000100D,false},{0x010000000000FFFF,false},{0x0100000000010000,true},{0x0100ABCDEF012000,true},{0x0100123400001000,true},{0x01FFFFFFFFFFFFFF,true},{0x0200000000000000,false},{0x0500000012345678,false},{0x4200000000000010,false},{0x420000000007E51A,false}};
+ for(const auto &[id,want]:boundaries)assert(BsdSpyService::ShouldMitm(sm::MitmProcessInfo{{777},{id}})==want);
+ Link ab,ba;tcpstream::Proxy pa(Link::Send,&ab),pb(Link::Send,&ba);ab.peer=&pb;ba.peer=&pa;ab.source=0x0a0d0101;ba.source=0x0a0d0202;ba.held=true;
+ tcpstream::Owner oa{101,0x0100000000011111},ob{202,0x0100000000022222};tcpstream::GameSession sa{},sb{};sa.owner=oa;sa.transport_epoch=1;sa.session_nonce=111;sa.binding_id=1;sa.capabilities=128;sa.self_ip=ab.source;sa.peers[0]=ba.source;sa.network_id[0]=42;sa.active=true;sb=sa;sb.owner=ob;sb.self_ip=ba.source;sb.peers[0]=ab.source;sb.session_nonce=222;sb.binding_id=2;pa.SetSession(sa);pb.SetSession(sb);
+ GameNamespace ga,gb;tcpstream::Forward fa(&ga,GameNamespace::Dispatch),fb(&gb,GameNamespace::Dispatch);
+ tcpstream::selected=&pa;auto aa=std::make_unique<BsdSpyService>(std::make_shared<Service>(Service{&ga}),sm::MitmProcessInfo{{oa.process},{oa.program}});
+ tcpstream::selected=&pb;auto bb=std::make_unique<BsdSpyService>(std::make_shared<Service>(Service{&gb}),sm::MitmProcessInfo{{ob.process},{ob.program}});
+ const int listen=fb.Socket().ret;assert(listen>=1000&&pb.SocketCreated(ob,listen,1));assert(fb.Bind(listen,{0,0}).ret==0);tcpstream::Endpoint local{};assert(fb.Name(listen,&local).ret==0);const int32_t listen_args[2]={listen,4};assert(fb.Call(18,listen_args,sizeof(listen_args)).ret==0);pb.Bound(ob,listen,{0,local.port});pb.Listening(ob,listen,4);const int32_t timeopt[3]={listen,0xffff,0x1006};int64_t timevalue[2]={0,300000};tcpstream::IpcBuffer timebuffer{timevalue,16,false};assert(fb.Call(21,timeopt,12,&timebuffer,1).ret==0);
+ const int client=fa.Socket().ret;assert(client>=1000&&pa.SocketCreated(oa,client,1));int32_t flags[3]={client,4,0x800};assert(fa.Call(20,flags,sizeof(flags)).ret==0);
+ auto destination=tcpstream::MakeAddress({sb.self_ip,local.port});s32 ret=0,error=0;u32 length=0;tcpstream::selected=&pa;
+ assert(aa->Connect({&ret},{&error},client,{destination.bytes,16})==0&&ret==-1&&error==115);
+ Until([&]{return pb.PendingAccept(ob,listen);},"remote backlog");
+ tcpstream::NativePollFd poll_in{client,4,0},poll_out{};
+ assert(aa->Poll({&ret},{&error},1,0,{reinterpret_cast<const u8*>(&poll_in),8},{reinterpret_cast<u8*>(&poll_out),8})==0&&ret==0&&!(poll_out.revents&4));
+ u8 writes[128]{},writes_out[128]{};writes[client/8]|=1<<(client%8);tcpstream::NativeSelectData selection{};selection.nfds=client+1;selection.padding=0xaaaaaaaa;selection.reserved[0]=0xbb; // actual C ABI padding is ignored.
+ assert(aa->Select({&ret},{&error},selection,{nullptr,0},{writes,128},{nullptr,0},{nullptr,0},{writes_out,128},{nullptr,0})==0&&ret==0&&!(writes_out[client/8]&(1<<(client%8))));
+ u8 address[16]{};assert(aa->GetPeerName({&ret},{&error},{&length},client,{address,16})==0&&ret==-1&&error==107);
+ assert(aa->GetSockName({&ret},{&error},{&length},client,{address,16})==0&&ret==0&&length==16);tcpstream::Endpoint virtual_local{};assert(tcpstream::ReadAddress(address,16,&virtual_local)&&virtual_local.ip==sa.self_ip);
+ // Accept executes real game-namespace Socket/Bind/Connect commands, not module fd operations.
+ tcpstream::selected=&pb;u8 short_addr[8]{};assert(bb->Accept({&ret},{&error},{&length},listen,{short_addr,8})==0&&ret>=1000&&length==16);const int accepted=ret;assert(gb.command_count[2]==2&&gb.command_count[14]==1);int64_t inherited_timeout=0;assert(fb.Timeout(accepted,false,&inherited_timeout).ret==0&&inherited_timeout==300);
+ ba.Flush();Until([&]{return pa.GetStatus(oa,client).state==tcpstream::State::Connected;},"OPEN completion");tcpstream::selected=&pa;
+ assert(aa->Poll({&ret},{&error},1,0,{reinterpret_cast<const u8*>(&poll_in),8},{reinterpret_cast<u8*>(&poll_out),8})==0&&ret==1&&(poll_out.revents&4));
+ assert(aa->Select({&ret},{&error},selection,{nullptr,0},{writes,128},{nullptr,0},{nullptr,0},{writes_out,128},{nullptr,0})==0&&ret==1&&(writes_out[client/8]&(1<<(client%8))));
+ assert(aa->GetPeerName({&ret},{&error},{&length},client,{address,16})==0&&ret==0);tcpstream::Endpoint virtual_peer{};assert(tcpstream::ReadAddress(address,16,&virtual_peer)&&virtual_peer.ip==sb.self_ip&&virtual_peer.port==local.port);
+ tcpstream::Endpoint physical_peer{};assert(fa.Name(client,&physical_peer,true).ret==0&&physical_peer.ip==0x7f000001);
+ std::vector<u8> bytes(4000);for(size_t i=0;i<bytes.size();i++)bytes[i]=u8(i*3+7);
+ assert(aa->Write({&ret},{&error},client,{bytes.data(),bytes.size()})==0&&ret==4000);
+ std::vector<u8> got(4000);size_t have=0;tcpstream::selected=&pb;while(have<got.size()){assert(bb->Read({&ret},{&error},accepted,{got.data()+have,got.size()-have})==0&&ret>0);have+=ret;}assert(got==bytes);
+ tcpstream::selected=&pa;assert(aa->DuplicateSocket({&ret},{&error},{client,0,0})==0&&ret>=1000);const int duplicate=ret;assert(aa->Close({&ret},{&error},client)==0&&ret==0);
+ assert(pa.GetStatus(oa,duplicate).state==tcpstream::State::Connected);s32 exemption=1;const int sets_before=ga.command_count[21];assert(aa->SetSockOpt({&ret},{&error},duplicate,0xffff,0x10000,{reinterpret_cast<const u8*>(&exemption),4})==0&&ret==-1&&error==95&&ga.command_count[21]==sets_before);assert(aa->Write({&ret},{&error},duplicate,{bytes.data(),bytes.size()})==0&&ret==4000);
+ tcpstream::selected=&pb;have=0;while(have<got.size()){assert(bb->Read({&ret},{&error},accepted,{got.data()+have,got.size()-have})==0&&ret>0);have+=ret;}assert(got==bytes);
+ tcpstream::selected=&pa;const int duplicates_before=ga.command_count[27];assert(aa->DuplicateSocket({&ret},{&error},{duplicate,1,0})==0&&ret==-1&&error==22&&ga.command_count[27]==duplicates_before);
+ u8 batch[32]{};assert(aa->RecvMMsg({&ret},{&error},{duplicate,1,0,0,0,0},{batch,sizeof(batch)})==0&&ret==-1&&error==95);assert(aa->SendMMsg({&ret},{&error},{duplicate,1,0},{batch,sizeof(batch)})==0&&ret==-1&&error==95);
+ assert(aa->Shutdown({&ret},{&error},duplicate,1)==0&&ret==0);tcpstream::selected=&pb;assert(bb->Read({&ret},{&error},accepted,{got.data(),1})==0&&ret==0);assert(bb->Shutdown({&ret},{&error},accepted,1)==0&&ret==0);
+ Until([&]{return !pa.GetMetrics().streams&&!pb.GetMetrics().streams;},"IPC half-close cleanup");assert(bb->Close({&ret},{&error},accepted)==0&&ret==0);assert(bb->Close({&ret},{&error},listen)==0&&ret==0);tcpstream::selected=&pa;assert(aa->Close({&ret},{&error},duplicate)==0&&ret==0);
+ // No transport capability: return a native failure, never connect a virtual address physically.
+ sa.capabilities=0;pa.SetSession(sa);int unsupported=fa.Socket().ret;assert(pa.SocketCreated(oa,unsupported,1));assert(aa->Connect({&ret},{&error},unsupported,{destination.bytes,16})==0&&ret==-1&&error==95);assert(ga.virtual_connects==0);assert(lanywhere::unavailable==1);assert(aa->Close({&ret},{&error},unsupported)==0);
+ const s32 exempt_args[3]={2,1,0};const int exempt=fa.Call(3,exempt_args,sizeof(exempt_args)).ret;assert(exempt>=1000);const int connects_before_exempt=ga.command_count[14];assert(aa->Connect({&ret},{&error},exempt,{destination.bytes,16})==0&&ret==-1&&error==105&&ga.command_count[14]==connects_before_exempt);fa.Close(exempt);
+ // An unsupported IPv4-mapped IPv6 virtual target also never escapes to BSD Connect.
+ u8 mapped[28]{};mapped[0]=28;mapped[1]=28;mapped[18]=mapped[19]=255;mapped[20]=10;mapped[21]=13;mapped[22]=2;mapped[23]=2;const int before=ga.command_count[14];assert(aa->Connect({&ret},{&error},1000,{mapped,28})==0&&ret==-1&&error==97&&ga.command_count[14]==before);
+ assert(aa->Poll({&ret},{&error},65,0,{nullptr,0},{nullptr,0})==0&&ret==-1&&error==22);
+ sa.capabilities=128;pa.SetSession(sa);int marked_exempt=fa.Socket().ret;assert(pa.SocketCreated(oa,marked_exempt,1));s32 exempt_on=1;assert(aa->SetSockOpt({&ret},{&error},marked_exempt,0xffff,0x10000,{reinterpret_cast<const u8*>(&exempt_on),4})==0&&ret==0);const int before_exempt_option=ga.command_count[14];assert(aa->Connect({&ret},{&error},marked_exempt,{destination.bytes,16})==0&&ret==-1&&error==95&&ga.command_count[14]==before_exempt_option);assert(aa->Close({&ret},{&error},marked_exempt)==0);int refused=fa.Socket().ret;assert(pa.SocketCreated(oa,refused,1));assert(aa->Connect({&ret},{&error},refused,{destination.bytes,16})==0&&ret==-1&&error==111);
+ s32 so_error=0;assert(aa->GetSockOpt({&ret},{&error},{&length},refused,0xffff,0x1007,{reinterpret_cast<u8*>(&so_error),4})==0&&ret==0&&so_error==111&&length==4);assert(aa->GetSockOpt({&ret},{&error},{&length},refused,0xffff,0x1007,{reinterpret_cast<u8*>(&so_error),4})==0&&so_error==0);assert(aa->Close({&ret},{&error},refused)==0);
+ tcpstream::selected=&pa;aa.reset();tcpstream::selected=&pb;bb.reset();ab.Disable();ba.Disable();
+ std::cout<<"Actual BSD source + raw IPC + real game-namespace sockets: connect, accept, select/poll, virtual names, partial IO, dup, half-close, SO_ERROR and fail-closed variants passed\n";
+}

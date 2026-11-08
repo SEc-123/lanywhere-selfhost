@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "records": [
+    {
+      "appid": "0100ABF008968000",
+      "zh": "宝可梦 剑",
+      "zh_locale": "zh-Hans",
+      "evidence": "nintendo_sword_simplified"
+    },
+    {
+      "appid": "01008C8012920000",
+      "en": "Dying Light: Platinum Edition",
+      "zh": "《消逝的光芒：白金版》",
+      "zh_locale": "zh-Hans",
+      "evidence": "local_nacp_20261107"
+    },
+    {
+      "appid": "01008F6008C5E000",
+      "en": "Pokémon Violet",
+      "zh": "宝可梦 紫",
+      "zh_locale": "zh-Hans",
+      "evidence": "local_nacp_20261107"
+    }
+  ],
+  "evidence": {
+    "nintendo_sword_simplified": {
+      "kind": "publisher_label",
+      "url": "https://www.nintendo.com/hk/topics/article/a_190812_01_sc.html",
+      "corroboration_url": "https://www.nintendo.com/hk/topics/article/a_200326_03_sc.html",
+      "scope": "Official simplified Chinese Sword/Shield naming; label only, no LCID/NACP/installed-state claim."
+    },
+    "local_nacp_20261107": {
+      "kind": "limited_nacp_metadata_observation",
+      "source_date": "2026-11-07",
+      "public_records_sha256": "c8cbf21188216c59e7018c8fde77b4d6e01243865c417e729a9757f962476915",
+      "method": "Two selected application records and their ordered NACP local-communication ID arrays were inspected. Only these limited records are included here.",
+      "scope": "A partial observation, not exhaustive LCID identity or current installation status. Unknown additional applications sharing an LCID remain possible."
+    }
+  }
+}

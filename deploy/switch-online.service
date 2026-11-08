@@ -1,0 +1,44 @@
+[Unit]
+Description=Switch Online room server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+DynamicUser=yes
+StateDirectory=switch-online
+StateDirectoryMode=0750
+WorkingDirectory=/opt/switch-online/current
+Environment=LANYWHERE_STATE_DIR=/var/lib/switch-online
+Environment=LANYWHERE_CAP_GB=100
+Environment=LANYWHERE_STATS_PORT=11461
+Environment=LANYWHERE_PUBLIC_PORT=0
+Environment=LANYWHERE_LANPLAY_PORT=0
+Environment=LANYWHERE_OPS_PORT=11462
+Environment=LANYWHERE_SHUTDOWN_GRACE_MS=10000
+Environment=LANYWHERE_MAX_CONNECTIONS=256
+Environment=LANYWHERE_MAX_CONNECTIONS_PER_IP=16
+EnvironmentFile=-/etc/switch-online/relay.env
+ExecStart=/usr/bin/node server.js --port 11460
+ExecStartPost=/usr/bin/node healthcheck.cjs --allow-paused
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=20s
+TimeoutStopSec=310s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

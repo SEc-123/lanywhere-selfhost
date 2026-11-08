@@ -1,0 +1,108 @@
+{
+  "platform": "Linux x86_64",
+  "toolchain": "devkitA64 r30 (GCC 16.1.0), libnx pinned source",
+  "packages": [
+    {
+      "name": "devkitA64",
+      "version": "r30-1",
+      "filename": "devkitA64-r30-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/devkitA64-r30-1-any.pkg.tar.zst",
+      "sha256": "66f100490dafe506495ee083bc932aa2c2f231b5dafaa2b203d1832389b700e9"
+    },
+    {
+      "name": "devkita64-binutils",
+      "version": "2.46.0-1",
+      "filename": "devkita64-binutils-2.46.0-1-x86_64.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/linux/x86_64/devkita64-binutils-2.46.0-1-x86_64.pkg.tar.zst",
+      "sha256": "0d61ad4946eb1080c6e645c41f0cfaac0a2eba5fec88426fef8f03363e933b5a"
+    },
+    {
+      "name": "devkita64-gcc",
+      "version": "16.1.0-1",
+      "filename": "devkita64-gcc-16.1.0-1-x86_64.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/linux/x86_64/devkita64-gcc-16.1.0-1-x86_64.pkg.tar.zst",
+      "sha256": "8192b899f0a5fcfe10d11fa63a631b45310c0c8f0b98d88c7c283c16e9d6b0fa"
+    },
+    {
+      "name": "devkita64-newlib",
+      "version": "4.6.0.20260123-4",
+      "filename": "devkita64-newlib-4.6.0.20260123-4-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/devkita64-newlib-4.6.0.20260123-4-any.pkg.tar.zst",
+      "sha256": "fc97ba1009a94b68f8714c3cc548ef697ca82687b72fe0c05a7ca3df81beb53e"
+    },
+    {
+      "name": "devkita64-rules",
+      "version": "1.1.1-1",
+      "filename": "devkita64-rules-1.1.1-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/devkita64-rules-1.1.1-1-any.pkg.tar.zst",
+      "sha256": "2649cf7827243447070073acc2aa2fee152a0592fc30e827ceed803c565a1ede"
+    },
+    {
+      "name": "general-tools",
+      "version": "1.4.4-1",
+      "filename": "general-tools-1.4.4-1-x86_64.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/linux/x86_64/general-tools-1.4.4-1-x86_64.pkg.tar.zst",
+      "sha256": "b6b59bd3d22d4f83a7f0668f749df7cf97b1f05083031e629d43ca4f4377c7b5"
+    },
+    {
+      "name": "libnx",
+      "version": "4.12.0-1",
+      "filename": "libnx-4.12.0-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/libnx-4.12.0-1-any.pkg.tar.zst",
+      "sha256": "c6950bdf8e4b872ece492225368c03e633776329548a7494f91aa1e8f239cd8a"
+    },
+    {
+      "name": "switch-bzip2",
+      "version": "1.0.8-1",
+      "filename": "switch-bzip2-1.0.8-1-any.pkg.tar.xz",
+      "url": "https://pkg.devkitpro.org/packages/switch-bzip2-1.0.8-1-any.pkg.tar.xz",
+      "sha256": "f12b167f55ef49e2ddd9b2287cdfb702a2521f88e24ef23966b31d7c56e8acba"
+    },
+    {
+      "name": "switch-freetype",
+      "version": "2.13.3-1",
+      "filename": "switch-freetype-2.13.3-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/switch-freetype-2.13.3-1-any.pkg.tar.zst",
+      "sha256": "1271c1c81758a29f6c47ccb3c34769aa03737775fff05d7ae6f64f36d77fe004"
+    },
+    {
+      "name": "switch-harfbuzz",
+      "version": "10.0.1-1",
+      "filename": "switch-harfbuzz-10.0.1-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/switch-harfbuzz-10.0.1-1-any.pkg.tar.zst",
+      "sha256": "9d1ed03d580ed4cb3dd55365773d2e12bffefab9cff97a48ac9f5fd68051c14c"
+    },
+    {
+      "name": "switch-libjpeg-turbo",
+      "version": "2.1.2-2",
+      "filename": "switch-libjpeg-turbo-2.1.2-2-any.pkg.tar.xz",
+      "url": "https://pkg.devkitpro.org/packages/switch-libjpeg-turbo-2.1.2-2-any.pkg.tar.xz",
+      "sha256": "26d77a0743eb810f9b9e873f3cac7fbf31a716bfb0a7981a8c3bf3812f6cd1bf"
+    },
+    {
+      "name": "switch-libpng",
+      "version": "1.6.48-1",
+      "filename": "switch-libpng-1.6.48-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/switch-libpng-1.6.48-1-any.pkg.tar.zst",
+      "sha256": "99ea23b88c00dc678fff4290064916d5795db1f7445829420b689b29ac0078ff"
+    },
+    {
+      "name": "switch-tools",
+      "version": "1.13.1-1",
+      "filename": "switch-tools-1.13.1-1-x86_64.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/linux/x86_64/switch-tools-1.13.1-1-x86_64.pkg.tar.zst",
+      "sha256": "de0a9473764d3c5205a7cc9b640e9e913c371b5684d526133384eb7e545c7dab"
+    },
+    {
+      "name": "switch-zlib",
+      "version": "1.3.1-1",
+      "filename": "switch-zlib-1.3.1-1-any.pkg.tar.zst",
+      "url": "https://pkg.devkitpro.org/packages/switch-zlib-1.3.1-1-any.pkg.tar.zst",
+      "sha256": "53cb5dc4006c96cd4195dabc15b46f07a63ad99c91939ce921db33556396442c"
+    }
+  ],
+  "libnx_source": {
+    "url": "https://github.com/switchbrew/libnx.git",
+    "commit": "b156b4774fb2df7b93402169509266da7547fc4c"
+  }
+}

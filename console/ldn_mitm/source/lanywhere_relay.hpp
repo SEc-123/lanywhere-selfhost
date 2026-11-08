@@ -1,0 +1,203 @@
+/* Modified by LANywhere Self-host, 2026-11-07 to 2026-11-08. */
+/*
+ * LANywhere: cliente del servidor de salas (docs/PROTOCOL.md).
+ *
+ * Mantiene la conexión de control (TCP) y la de datos (UDP) con el servidor mientras la consola está en una sala,
+ * y guarda en una cola los paquetes que llegan para cada puerto virtual; bsd_mitm los entrega al juego en su
+ * siguiente recvfrom.
+ *
+ * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+ * the GNU General Public License, version 2, as published by the Free Software Foundation.
+ */
+#pragma once
+#include <stratosphere.hpp>
+#include "../../../common/list_status.h"
+
+namespace ams::mitm::ldn {
+    struct NetworkInfo;
+    struct ScanFilter;
+}
+
+R_DEFINE_NAMESPACE_RESULT_MODULE(ams::mitm::lanywhere, 450);
+
+namespace ams::mitm::lanywhere {
+
+    R_DEFINE_ERROR_RESULT(RelayFailed, 1);  // el motivo legible queda en Status::error
+
+    constexpr size_t CodeLength = 6;
+    constexpr size_t NickLength = 32;
+    constexpr size_t MaxMembers = 8;
+    constexpr size_t MaxPayload = 1472;  // legacy wire payload limit
+
+    enum class RelayState : u8 { Idle = 0, Connecting = 1, InRoom = 2, Error = 3 };
+
+    struct Member {
+        bool present;
+        u8 index;
+        u32 ip;  // orden de host
+        char nick[NickLength];
+    };
+
+    // Lo que ve la app "Jugar en línea" (y la prueba).
+    struct Status {
+        RelayState state;
+        u8 my_index;
+        u8 member_count;
+        u8 padding;
+        u32 my_ip;
+        char code[8];
+        u64 game_id;
+        u32 packets_sent, packets_received;
+        char error[64];
+    };
+    static_assert(sizeof(Status) == 0x60);
+
+    // Un grupo abierto, resumido para la app.
+    struct GroupSummary {
+        char code[8];
+        u64 game_id;      // localCommunicationId (en casi todos los juegos, su id de aplicación)
+        u8 players, max_players;
+        u8 padding[6];
+        char host[40];    // nombre del anfitrión en el juego
+    };
+    static_assert(sizeof(GroupSummary) == 0x40);
+
+    constexpr u32 ProtocolVersion = 5;
+    constexpr u32 GroupPageEnd = 0xffffffff;
+    constexpr size_t GroupPageSize = 6;
+
+    struct GroupPage {
+        s32 count;
+        u32 next;
+    };
+    static_assert(sizeof(GroupPage) == 8);
+
+    struct GroupSummaryV2 {
+        char code[8];
+        u64 game_id; // LCID, never an application ID.
+        u64 application_id, program_id;
+        u8 players, max_players, metadata_flags, padding[5];
+        char host[40], title_en[128], title_zh[128];
+    };
+    static_assert(sizeof(GroupSummaryV2) == 336);
+    static_assert(offsetof(GroupSummaryV2, title_en) == 80 && offsetof(GroupSummaryV2, title_zh) == 208);
+    struct GroupPageV2 { s32 count; u32 next, capabilities, reserved; };
+    static_assert(sizeof(GroupPageV2) == 16);
+    int FindGroupSummaries(u32 offset, GroupPageV2 *page, GroupSummaryV2 *groups, size_t capacity);
+
+    enum class MatchMode : u8 { Manual, Quick, Exact };
+    enum class MatchState : u8 { Idle, WaitingForGame, Searching, Assigned, Joining, Joined, Expired, Cancelled, Error };
+    struct MatchStatus {
+        u64 game_id;
+        u32 ttl_seconds;
+        MatchMode mode;
+        MatchState state;
+        u8 players, target;
+        char room[8];
+        char error[64];
+    };
+    static_assert(sizeof(MatchStatus) == 88);
+    static_assert(offsetof(MatchStatus, room) == 16 && offsetof(MatchStatus, error) == 24);
+
+    // La red virtual de una sala: 10.13.0.0/16 (la misma de LAN Play, así los emuladores ven las mismas IPs que las
+    // consolas), o 10.114.0.0/24 en salas de servidores antiguos. La decide la IP que da el servidor.
+    constexpr u32 VirtualNet = (10u << 24) | (114u << 16);
+    constexpr u32 LanPlayNet = (10u << 24) | (13u << 16);
+    u32 Netmask();
+    bool IsVirtual(u32 ip);
+
+    // A scan is bound to this endpoint/provider for every page and its eventual join.
+    // Address and port are stored in network byte order; this is internal, not a wire/IPC type.
+    struct DiscoveryRoute {
+        u32 ipv4;
+        u16 port;
+        bool public_enabled;
+        char provider[33];
+    };
+    bool CaptureDiscoveryRoute(DiscoveryRoute *out);
+    struct GameRoute { DiscoveryRoute discovery; u64 room_epoch; u32 room_token; char room_code[8]; };
+    // Active rooms retain their joined provider even if preferences change.
+    bool CaptureGameRoute(GameRoute *out);
+    bool GameRouteStillCurrent(const GameRoute &route);
+    void ReportGameNetworkError(bool unavailable);
+    void ReportGameRouteChanged();
+
+    // El nombre en la sala es siempre el apodo (config.ini "apodo="; uno al azar si no hay), nunca el nombre de
+    // usuario de la consola.
+    void Nickname(char *out, size_t size);
+    Result CreateRoom(u64 game_id, const DiscoveryRoute *route = nullptr, GameRoute *joined = nullptr);
+    Result JoinRoom(const char *code, u64 game_id, const DiscoveryRoute *route = nullptr, GameRoute *joined = nullptr);
+    void LeaveRoom();
+    void LeaveGameRoom(const GameRoute &owned);
+    void GetStatus(Status *out);
+    bool InRoom();
+    u32 MyIp();
+    // Stream transport is a distinct bounded path; it never enters the lossy
+    // LDN control queue. Epoch changes invalidate all game TCP byte streams.
+    bool CaptureTcpTransport(u64 *epoch, u32 *capabilities, u32 *self_ip);
+    bool SendTcpFrame(u64 epoch, const void *body, size_t size);
+    void ReportTcpUnavailable();
+    // Distinto en cada sala (del código): para que los grupos de salas distintas no compartan BSSID.
+    u32 RoomTag();
+
+    // Envía un paquete del juego a otro miembro (o a todos, si dst es broadcast).
+    bool SendData(u32 dst_ip, u16 src_port, u16 dst_port, const void *data, size_t size);
+
+    // Saca de la cola el primer paquete para ese puerto: devuelve su tamaño (truncado a `size`) o -1 si no hay.
+    ssize_t ReceiveData(u16 port, void *buffer, size_t size, u32 *src_ip, u16 *src_port, bool peek = false);
+    // Hay algún paquete esperando para ese puerto.
+    bool HasData(u16 port);
+
+    // Control de ldn (búsqueda, unión y sincronización de grupos) entre miembros de la sala, por la conexión TCP
+    // con el servidor: llega entero y en orden. Cada mensaje es [LdnMsg][datos].
+    enum class LdnMsg : u8 {
+        Scan = 1,        // ¿quién tiene un grupo?                 (a todos)
+        ScanResp = 2,    // NetworkInfo del grupo                  (al que buscó)
+        Connect = 3,     // NodeInfo del que se une                (al anfitrión)
+        Sync = 4,        // NetworkInfo actualizado                (del anfitrión a cada estación)
+        Disconnect = 5,  // sale del grupo o lo cierra
+        MemberLeft = 0xFF,  // generado aquí: el miembro salió de la sala
+    };
+    constexpr u8 AllMembers = 0xFF;
+    constexpr size_t MaxControl = 0x500;
+
+    // Grupos abiertos: el anfitrión publica su grupo de ldn (NetworkInfo; tamaño 0 lo retira) y quien busca recibe
+    // los de su juego con sitio libre, con el código de su sala.
+    bool PublicEnabled();  // config.ini "public=0" los desactiva
+    void Publish(const void *network_info, size_t size, u64 host_program_id);
+    // Pregunta con una conexión aparte (no hace falta estar en una sala). Devuelve cuántos o -1.
+    // from_app: la pide la lista de la app (no el juego al buscar grupo); el servidor lo cuenta aparte en el panel.
+    int FindGroups(u64 local_communication_id, void (*found)(const char *code, const void *network_info, void *user), void *user,
+                   bool from_app, const DiscoveryRoute *route = nullptr);
+
+    int FindGroupsPage(u64 local_communication_id, u32 offset, u32 *next,
+                       void (*found)(const char *code, const void *network_info, void *user), void *user,
+                       const DiscoveryRoute *route = nullptr);
+    int FindGroupsFilteredPage(const ldn::ScanFilter &filter, u32 offset, u32 *next,
+                       void (*found)(const char *code, const void *network_info, void *user), void *user,
+                       const DiscoveryRoute *route = nullptr);
+
+    Result StartMatch(MatchMode mode, const char *code = nullptr);
+    void CancelMatch();
+    void GetMatchStatus(MatchStatus *out);
+    bool MatchArmed();
+    enum class MatchScanResult { Manual, Empty, Assigned };
+    MatchScanResult ScanMatch(const ldn::ScanFilter &filter, ldn::NetworkInfo *out, const DiscoveryRoute *route = nullptr);
+    void PollMatch();
+    struct MatchJoinAttempt { u8 ticket[16]; };
+    Result JoinMatch(const ldn::NetworkInfo &info, u16 actual_version, MatchJoinAttempt *attempt);
+    bool MatchJoinPending(const MatchJoinAttempt &attempt);
+    bool FinishMatch(const MatchJoinAttempt &attempt, bool joined);
+    void LeaveMatchRoom(const MatchJoinAttempt &attempt);
+
+    // Registro de la sala en sdmc:/lanywhere/relay.log (hasta 256 KB).
+    void Log(const char *fmt, ...);
+
+    bool SendControl(u8 dest, LdnMsg msg, const void *data, size_t size, const MatchJoinAttempt *match = nullptr);
+    // Saca el siguiente mensaje de control: tamaño de los datos (sin el LdnMsg) o -1 si no hay.
+    ssize_t TakeControl(u8 *from, LdnMsg *msg, void *buffer, size_t size);
+
+    // Índice del miembro con esa IP virtual, o -1.
+    int MemberOfIp(u32 ip);
+
+}
