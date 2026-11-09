@@ -8,6 +8,7 @@ const { parse: parseMetadata, RECORD_BYTES } = require('./room-metadata');
 const streamProtocol = require('./tcp-stream-protocol');
 const MAGIC = 0x594e414c;
 const SELECT = 0x20, SELECTED = 0xa0, CAPS = 0x0b;
+const ROOM_PASSCODE_CAPABILITY = 512, ROOM_ACCESS_CAPABILITY = 1024, UNIFIED_LOBBY_CAPABILITY = 2048;
 const PUBLIC_PROVIDERS = Object.freeze([{ id: 'lanywhere-public', host: '129.38.114.182', port: 11460, maxConnections: 8, connectTimeoutMs: 8000, adapterMetadata: true }]);
 const codeValid = b => b.length === 6 && /^[A-HJ-NP-Z2-9]{6}$/.test(b.toString('latin1'));
 const publicIp = socket => (socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -39,7 +40,7 @@ function createDiagnostics({ providerIds = [], emit = () => {}, count = () => {}
     return { record, snapshot: () => [...counters.values()].map(({lastLogAt, ...value}) => value) };
 }
 
-function create({ providers = [], send, sendUdp, isLocalToken = () => false, count = () => {}, onEvent = () => {},
+function create({ providers = [], send: sendFront, sendUdp, isLocalToken = () => false, count = () => {}, onEvent = () => {},
     selfCapabilities = () => 63, paused = () => false, draining = () => false, bindAddress = '0.0.0.0',
     connectTimeoutMs = 3000, queryTimeoutMs = 2500, graceMs = 55000, maxTokens = 512, dataBytes = 512 * 1024, dataPackets = 1000 }) {
     if (!net.isIPv4(bindAddress) || !Number.isInteger(graceMs) || graceMs < 1 || graceMs > 60000) throw Error('Invalid upstream gateway limits');
@@ -50,8 +51,13 @@ function create({ providers = [], send, sendUdp, isLocalToken = () => false, cou
             !Number.isInteger(p.maxConnections) || p.maxConnections < 1 || p.maxConnections > 8) throw Error('Invalid allowlisted upstream');
         registry.set(p.id, { ...p, active: 0, rates: new Map() });
     }
-    const capabilities = p => (p.capabilities || p.udpCaps || 0) | (p.adapterMetadata ? 64 : 0);
+    const capabilities = p => ((p.capabilities || p.udpCaps || 0) & ~(ROOM_PASSCODE_CAPABILITY | ROOM_ACCESS_CAPABILITY | UNIFIED_LOBBY_CAPABILITY)) | (p.adapterMetadata ? 64 : 0);
     const routes = new Map(), localLocked = new WeakSet(), tokens = new Map();
+    const lobbyQueries = new WeakMap();
+    const send = (front, type, body) => {
+        const receive = lobbyQueries.get(front);
+        return receive ? receive(type, body) : sendFront(front, type, body);
+    };
     let closing = false;
     const error = (front, code, text, reason, providerId) => {
         const provider = providerId || routes.get(front)?.provider?.id || 'unknown';
@@ -279,14 +285,14 @@ function create({ providers = [], send, sendUdp, isLocalToken = () => false, cou
         routes.set(front, route);
         route.timer = setTimeout(() => fail(route, 13, 'upstream handshake timed out'), provider.connectTimeoutMs || connectTimeoutMs).unref();
         let endpoint;
-        try { endpoint = provider.acquire ? await provider.acquire() : provider; }
+        try { endpoint = provider.acquire ? await provider.acquire({ discoveryOnly: lobbyQueries.has(front) }) : provider; }
         catch (error) { return fail(route, error.code === 'REALM_CAPACITY' ? 7 : error.code === 'UPSTREAM_TIMEOUT' ? 13 : 11,
             error.code === 'REALM_CAPACITY' ? 'LAN Play community capacity reached' : error.code === 'UPSTREAM_TIMEOUT' ? 'LAN Play upstream startup timed out' : 'LAN Play upstream not reachable'); }
         if (route.closed) { endpoint.release?.(); return; }
         route.lease = endpoint;
         const tcp = route.tcp = net.createConnection({ host: endpoint.host, port: endpoint.port,
             ...(provider.localTransport || bindAddress === '0.0.0.0' ? {} : { localAddress: bindAddress }) });
-        const udp = route.udp = dgram.createSocket('udp4');
+        const udp = lobbyQueries.has(front) ? null : (route.udp = dgram.createSocket('udp4'));
         route.lastFrameAt = Date.now();
         route.liveness = setInterval(() => {
             if (route.ready && Date.now() - route.lastFrameAt > 20000) fail(route, 13, 'upstream stopped responding');
@@ -308,6 +314,7 @@ function create({ providers = [], send, sendUdp, isLocalToken = () => false, cou
         });
         tcp.on('error', () => fail(route)); tcp.on('timeout', () => fail(route, 13, 'upstream control timed out'));
         tcp.on('close', () => { if (!route.closed) fail(route, 11, 'upstream control closed'); });
+        if (!udp) return;
         udp.on('error', () => fail(route, 11, 'upstream UDP unavailable'));
         udp.on('message', (bytes, sender) => {
             const record = route.record;
@@ -462,20 +469,110 @@ function create({ providers = [], send, sendUdp, isLocalToken = () => false, cou
         route.udp.send(rewritten, e => { if (e) fail(route,11,'upstream UDP send failed'); }); if (!route.provider.localTransport) count(bytes.length+28);
         return true;
     }
+    function queryLobby(providerId) {
+        if (!registry.has(providerId) || closing || paused() || draining()) return Promise.resolve(null);
+        return new Promise(resolve => {
+            const front = { destroyed: false, writableEnded: false, end: () => finish(null) };
+            const rows = new Map();
+            let offset = 0, pages = 0, request = 0;
+            const timeout = setTimeout(() => finish(null), 16_000).unref();
+
+            function finish(result) {
+                if (front.destroyed) return;
+                front.destroyed = true;
+                clearTimeout(timeout);
+                onClose(front);
+                lobbyQueries.delete(front);
+                resolve(result);
+            }
+
+            function ask() {
+                if (paused() || draining() || closing) return finish(null);
+                const body = Buffer.alloc(request === 8 ? 15 : 12);
+                if (request === 8) body[14] = 1;
+                else body.writeUInt32LE(offset, 8);
+                handleFrame(front, request, body);
+            }
+
+            lobbyQueries.set(front, (type, body) => {
+                if (type === SELECTED && !request) {
+                    const caps = body.readUInt32LE();
+                    request = caps & 64 ? 0x22 : caps & 2 ? 0x0c : 8;
+                    ask();
+                    return true;
+                }
+                if (type !== (request === 0x22 ? 0xa2 : request === 0x0c ? 0x8a : 0x87)) {
+                    finish(null);
+                    return true;
+                }
+                const next = request === 8 ? 0xffffffff : body.readUInt32LE();
+                const count = request === 8 ? body[0] : body[4];
+                if (next !== 0xffffffff && (!count || next !== offset + count)) {
+                    finish(null);
+                    return true;
+                }
+                const page = request === 0x22 ? body : metadataPage(routes.get(front),
+                    request === 8 ? body : body.subarray(4), 0n);
+                if (!page) {
+                    finish(null);
+                    return true;
+                }
+                for (let i = 0; i < count; i++) {
+                    const row = normalizeLobbySummary(page.subarray(5 + i * RECORD_BYTES, 5 + (i + 1) * RECORD_BYTES));
+                    if (!row) {
+                        finish(null);
+                        return true;
+                    }
+                    rows.set(row.toString('ascii', 0, 6) + ':' + row.readBigUInt64LE(8), row);
+                }
+                if (next === 0xffffffff) finish([...rows.values()]);
+                else if (++pages >= 24) finish(null); // A bounded incomplete listing is not a ready source.
+                else {
+                    offset = next;
+                    ask();
+                }
+                return true;
+            });
+            handleFrame(front, SELECT, Buffer.from(providerId, 'ascii'));
+        });
+    }
+
+    function normalizeLobbySummary(source) {
+        if (source.length !== RECORD_BYTES || !codeValid(source.subarray(0, 6)) || source[6] || source[7] ||
+            !source.readBigUInt64LE(8) || source[32] < 1 || source[33] < source[32] || source[33] > 8) return null;
+        const row = Buffer.from(source);
+        // External compatibility routes never advertise self-only password modes.
+        row.fill(0, 35, 40);
+        const identity = Buffer.concat([row.subarray(24, 32), row.subarray(16, 24), row.subarray(80)]);
+        if (row[34] !== 1 || !parseMetadata(identity)) {
+            row.fill(0, 16, 32);
+            row[34] = 0;
+            row.fill(0, 80);
+        }
+        return row;
+    }
     function onClose(front) { const route = routes.get(front); if (route && route.id !== 'self') close(route); routes.delete(front); }
     function shutdown() {
         closing = true;
-        for (const route of routes.values()) if (route.id !== 'self') { if (route.record) upstreamWrite(route,3,Buffer.alloc(0)); close(route,false); }
+        for (const route of routes.values()) if (route.id !== 'self') {
+            if (lobbyQueries.has(route.front)) route.front.end();
+            else {
+                if (route.record) upstreamWrite(route,3,Buffer.alloc(0));
+                close(route,false);
+            }
+        }
         for (const record of tokens.values()) forget(record);
         routes.clear();
     }
-    return { handleFrame, handleDatagram, onClose, shutdown, hasToken: token => tokens.has(token),
+    return { handleFrame, handleDatagram, onClose, shutdown, queryLobby, lobbyProviders: () => [...registry.keys()], hasToken: token => tokens.has(token),
+        isSelf: front => !front.virtual && (!routes.has(front) || routes.get(front).id === 'self'),
         activeMembers: () => [...tokens.values()].filter(r => active(r.route)).length,
         snapshot: () => {
             const current = [...tokens.values()].filter(r => active(r.route));
-            return { connections: [...registry.values()].reduce((n,p)=>n+p.active,0), members: tokens.size, retainedMembers: tokens.size - current.length,
+            const connections = [...routes.values()].filter(route => route.provider && !route.closed && !lobbyQueries.has(route.front)).length;
+            return { connections, members: tokens.size, retainedMembers: tokens.size - current.length,
                 activeMembers: current.length, rooms: new Set(current.map(r => r.providerId + ':' + r.code)).size,
                 privateRooms: new Set(current.filter(r => r.gameId === 0n).map(r => r.providerId + ':' + r.code)).size };
         } };
 }
-module.exports = { create, createDiagnostics, PUBLIC_PROVIDERS, SELECT, SELECTED };
+module.exports = { create, createDiagnostics, PUBLIC_PROVIDERS, SELECT, SELECTED, ROOM_PASSCODE_CAPABILITY, ROOM_ACCESS_CAPABILITY, UNIFIED_LOBBY_CAPABILITY };

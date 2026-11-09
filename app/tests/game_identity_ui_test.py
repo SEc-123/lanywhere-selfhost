@@ -14,7 +14,7 @@ routes = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(routes)
 game_type = re.search(r'typedef struct\s*\{[^}]*\}\s*GameInfo;', source).group()
 functions = '\n\n'.join(routes.function(source, 'static ' + name) for name in
-    ('const GameInfo *local_game_info(', 'CatalogMatch room_catalog_match(', 'bool game_info_has_lcid(', 'const char *room_title(', 'bool open_selected_game('))
+    ('const GameInfo *local_game_info(', 'CatalogMatch room_catalog_match(', 'bool game_info_has_lcid(', 'const char *room_title(', 'bool room_password_allows_launch(', 'bool open_selected_game('))
 harness = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -30,7 +30,7 @@ typedef struct { void *px; int w,h; } Image;
 #define TR(es,en) ui_tr((es),(en))
 #define R_FAILED(x) ((x)!=0)
 ''' + game_type + r'''
-typedef struct { LobbyRoomId pinned; LobbyGroup pinned_group; char message[128]; } View;
+typedef struct { LobbyRoomId pinned; LobbyGroup pinned_group; RoomPasswordView password; char message[128]; } View;
 static bool g_zh, installed;
 static GameCatalog g_catalog;
 static GameInfo fake;
@@ -48,7 +48,16 @@ int main(void) {
     installed=true; ui_set_language(false,false);
     assert(!strcmp(room_title(&room,fallback,sizeof(fallback)),"Local game") && last_query==0x111);
     View v={0};v.pinned.game_id=room.game_id;v.pinned_group=room;
-    assert(open_selected_game(&v) && launches==1);
+    v.password.pending = true;
+    assert(!open_selected_game(&v) && launches == 0);
+    v.password.pending = false;
+    v.pinned_group.room_access = RoomAccessHidden;
+    assert(!open_selected_game(&v) && launches == 0);
+    v.password.room.game_id = room.game_id;
+    v.password.locked = true;
+    assert(!open_selected_game(&v) && launches == 0);
+    v.password.unlocked = true;
+    assert(open_selected_game(&v) && launches == 1);
     fake.lcids[0]=0x333; launches=0;
     assert(!strcmp(room_title(&room,fallback,sizeof(fallback)),"Host game"));
     assert(!open_selected_game(&v) && launches==0); /* claimed ID does not match local LCID */

@@ -19,6 +19,6 @@ test('managed release includes every local runtime dependency ', () => {
             assert(files.has(dependency), `${name} needs unshipped ${dependency}`);
         }
     }
-    for (const name of ['upstream-gateway.js','room-metadata.js','lanplay-providers.js','lanplay-realms.js'])
+    for (const name of ['upstream-gateway.js','room-metadata.js','lanplay-providers.js','lanplay-realms.js','unified-lobby.js'])
         assert(files.has(name), `${name} must be shipped with the gateway release`);
 });

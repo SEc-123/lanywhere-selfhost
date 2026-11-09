@@ -446,10 +446,13 @@ namespace ams::mitm::ldn {
             const Result rc = this->resolveGameLcid(&filter.networkId.intentId.localCommunicationId, gameRoute);
             if (R_FAILED(rc)) { *count = 0; return rc; }
         }
+        const bool wrong_selection = gameRoute.discovery.selected_game_id &&
+            (!(filter.flag & ScanFilterFlag_LocalCommunicationId) ||
+             filter.networkId.intentId.localCommunicationId != gameRoute.discovery.selected_game_id);
         NetworkInfo selected;
         // Legacy external communities use an unresolved wire sentinel; it is
         // never an identity on which to enable our reserved auto-matching.
-        const auto match = gameRoute.room_epoch || !gameRoute.discovery.public_enabled || std::strcmp(gameRoute.discovery.provider, "self") ?
+        const auto match = wrong_selection || gameRoute.room_epoch || !gameRoute.discovery.public_enabled || std::strcmp(gameRoute.discovery.provider, "self") ?
             lanywhere::MatchScanResult::Manual : lanywhere::ScanMatch(filter, &selected, &gameRoute.discovery);
         {
             std::scoped_lock lock(this->scanResultsMutex);
@@ -459,6 +462,10 @@ namespace ams::mitm::ldn {
             this->lastScanRoute = gameRoute;
             this->haveScanRoute = true;
             this->physicalScanActive = !gameRoute.room_epoch && !gameRoute.discovery.public_enabled;
+        }
+        if (wrong_selection) {
+            *count = 0;
+            return 0;
         }
         if (match != lanywhere::MatchScanResult::Manual) {
             if (*count && match == lanywhere::MatchScanResult::Assigned) {
@@ -499,7 +506,8 @@ namespace ams::mitm::ldn {
                         if (!lanywhere::GameRouteStillCurrent(gameRoute)) return -1;
                         return lanywhere::FindGroupsFilteredPage(filter, offset, next, &LANDiscovery::onPublicGroup, &context, &route);
                     },
-                    [&]() { return this->publicGroupCount >= this->publicGroups.size(); },
+                    [&]() { return route.selected_game_id ? this->publicGroupCount > 0 :
+                        this->publicGroupCount >= this->publicGroups.size(); },
                     lanywhere::GroupPageEnd, 16);
             }
             if (!waitForReplies && publicGroups < 0) {
@@ -731,7 +739,9 @@ namespace ams::mitm::ldn {
         LANDiscovery *self = context.self;
         NetworkInfo info;
         std::memcpy(&info, data, sizeof(info));
-        if (!MatchesScanFilter(*context.filter, info)) return;
+        if (!MatchesScanFilter(*context.filter, info) ||
+            (context.route.selected_game_id && (info.networkId.intentId.localCommunicationId != context.route.selected_game_id ||
+             std::strcmp(code, context.route.selected_code) != 0))) return;
         std::scoped_lock lock(self->scanResultsMutex);
         if (self->publicGroupCount >= self->publicGroups.size() || !self->udp) {
             return;
@@ -865,15 +875,13 @@ namespace ams::mitm::ldn {
     }
 
     Result LANDiscovery::createNetwork(const SecurityConfig *securityConfig, const UserConfig *userConfig, const NetworkConfig *networkConfig) {
-        LogFormat("SecurityConfig");
-        LogHex(securityConfig->passphrase, securityConfig->passphraseSize);
         Result rc = 0;
 
         if (this->state != CommState::AccessPoint) {
             return MAKERESULT(LdnModuleId, 32);
         }
         lanywhere::GameRoute gameRoute{};
-        if (!lanywhere::CaptureGameRoute(&gameRoute)) {
+        if (!lanywhere::CaptureHostGameRoute(&gameRoute)) {
             lanywhere::ReportGameRouteChanged();
             return lanywhere::ResultRelayFailed();
         }

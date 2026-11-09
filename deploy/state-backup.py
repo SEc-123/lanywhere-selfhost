@@ -24,6 +24,7 @@ PATHS = {
     'traffic.json': (STATE_DIR / 'traffic.json', 256),
     'stats.json': (STATE_DIR / 'stats.json', 16 * 1024 * 1024),
     'games.json': (STATE_DIR / 'games.json', 2 * 1024 * 1024),
+    'appointments.json': (STATE_DIR / 'appointments.json', 2 * 1024 * 1024),
 }
 MAX_TAR_BYTES = sum(limit for _, limit in PATHS.values()) + 65536
 MAX_ARCHIVE_BYTES = MAX_TAR_BYTES + 65536
@@ -117,6 +118,14 @@ def validate(entries):
             names = parse_json(name, data)
             if any(not re.fullmatch(r'[0-9A-Fa-f]{16}', key) or not isinstance(name, str) for key, name in names.items()):
                 raise ValueError('Invalid games.json title mapping')
+        elif name == 'appointments.json':
+            parse_json(name, data)
+            module = Path(__file__).resolve().parent.parent / 'server/relay/appointments.js'
+            result = subprocess.run([os.environ.get('SWITCH_ONLINE_NODE', 'node'), '-e',
+                                     'require(process.argv[1]).validateState(JSON.parse(require("node:fs").readFileSync(0, "utf8")))',
+                                     str(module)], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if result.returncode:
+                raise ValueError('Invalid appointments.json or unavailable appointment validator')
 
 
 def read_archive(path):

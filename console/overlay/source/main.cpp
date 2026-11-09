@@ -4,11 +4,17 @@
 #include <tesla.hpp>
 #include "ldn.h"
 #include "model.hpp"
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstring>
+#include <string_view>
 
 namespace {
     Service g_ldnSrv{}, g_relay{};
     LdnMitmConfigService g_config{};
     overlay::Snapshot g_snapshot{};
+    RoomPasscodeHost g_passcode_host{};
     bool g_chinese = false, g_protocol_mismatch = false;
     char g_version[32]{};
     std::string g_notice;
@@ -17,9 +23,27 @@ namespace {
 
     const char *tr(const char *english, const char *chinese) { return g_chinese ? chinese : english; }
 
+    bool chinesePreference(const char *path, bool *found) {
+        FILE *file = std::fopen(path, "rb");
+        *found = file != nullptr;
+        if (!file) return false;
+        char value[32];
+        size_t size = std::fread(value, 1, sizeof(value), file);
+        const bool valid = std::feof(file) && !std::ferror(file);
+        std::fclose(file);
+        if (size && value[size - 1] == '\n') --size;
+        if (size && value[size - 1] == '\r') --size;
+        return valid && std::string_view(value, size) == "language=zh";
+    }
+
+    bool hasPasscodeHost() {
+        return g_passcode_host.status == RoomPasscodeOk && g_passcode_host.room[0] != '\0';
+    }
+
     void refresh() {
         g_snapshot.config_ok = false;
         g_snapshot.relay_ok = false;
+        g_passcode_host = {};
         u32 enabled = 0, logging = 0;
         if (serviceIsActive(&g_config.s) && R_SUCCEEDED(ldnMitmGetEnabled(&g_config, &enabled)) &&
             R_SUCCEEDED(ldnMitmGetLogging(&g_config, &logging))) {
@@ -34,6 +58,11 @@ namespace {
             g_snapshot.relay_ok = true;
             g_snapshot.status = status;
             g_snapshot.match = match;
+            if (status.state == 2 && status.my_index == 0 && status.game_id) {
+                if (R_FAILED(lanywhereOverlayGetPasscodeHost(&g_relay, &g_passcode_host)) ||
+                    std::memcmp(status.code, g_passcode_host.room, sizeof(status.code)))
+                    g_passcode_host = {};
+            }
         } else {
             g_snapshot.status = {};
             g_snapshot.match = {};
@@ -46,6 +75,7 @@ namespace {
         serviceClose(&g_config.s);
         serviceClose(&g_ldnSrv);
         g_snapshot = {};
+        g_passcode_host = {};
     }
 
     void connectServices() {
@@ -137,13 +167,164 @@ namespace {
         }
     }
 
+    class PasscodeGui : public tsl::Gui {
+        static constexpr std::array<std::string_view, 4> Characters{
+            "0123456789",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "abcdefghijklmnopqrstuvwxyz",
+            " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+        };
+        RoomPasscodeChange m_change{};
+        size_t m_length{}, m_group{}, m_character{};
+        bool m_hidden = true;
+        tsl::elm::CategoryHeader *m_visibility{};
+        tsl::elm::ListItem *m_code_first{}, *m_code_second{}, *m_picker{}, *m_feedback{};
+        const char *m_message = "";
+
+        static size_t cycle(size_t index, int step, size_t count) {
+            return (static_cast<int>(index + count) + step) % count;
+        }
+
+        void submit(bool clear) {
+            if (!clear && !m_length) {
+                m_message = tr("Enter the game password.", "请输入游戏密码。");
+                return;
+            }
+            refresh();
+            if (!hasPasscodeHost() || std::memcmp(m_change.room, g_passcode_host.room, sizeof(m_change.room))) {
+                m_message = tr("Room closed or changed.", "房间已关闭或变化。");
+                return;
+            }
+
+            RoomAccessChange request{};
+            std::memcpy(request.change.room, m_change.room, sizeof(request.change.room));
+            if (!clear) std::memcpy(request.change.passcode, m_change.passcode, m_length);
+            request.hidden = !clear && m_hidden;
+            u32 status = RoomPasscodeUnavailable;
+            if (R_FAILED(lanywhereOverlaySetRoomAccess(&g_relay, &request, &status)))
+                status = RoomPasscodeUnavailable;
+            switch (status) {
+                case RoomPasscodeOk:
+                    std::memset(m_change.passcode, 0, sizeof(m_change.passcode));
+                    m_length = 0;
+                    if (clear) m_message = tr("Password cleared.", "密码已清除。");
+                    else if (m_hidden) m_message = tr("Password hidden.", "密码已隐藏。");
+                    else m_message = tr("Password shared in lobby.", "密码已公开到大厅。");
+                    g_notice = m_message;
+                    g_notice_until = armGetSystemTick() + 5 * armGetSystemTickFreq();
+                    break;
+                case RoomPasscodeInvalid: m_message = tr("Invalid password.", "密码格式无效。"); break;
+                case RoomPasscodeRoomUnavailable: m_message = tr("Room closed or changed.", "房间已关闭或变化。"); break;
+                case RoomPasscodeNotHost: m_message = tr("Host in the game first.", "请先在游戏里建房。"); break;
+                case RoomPasscodeBusy: m_message = tr("Try again in a moment.", "请稍后再试。"); break;
+                default: m_message = tr("Could not save password.", "无法保存密码。"); break;
+            }
+        }
+
+        void redraw() {
+            const size_t first = std::min<size_t>(12, m_length);
+            const auto segment = [&](size_t start, size_t count) {
+                return count ? "[" + std::string(m_change.passcode + start, count) + "]" : "—";
+            };
+            m_visibility->setText(m_hidden ?
+                tr("Hidden · Guests enter password", "隐藏 · 访客需输入密码") :
+                tr("Shared · Visible in the lobby", "公开 · 大厅所有人可见"));
+            m_code_first->setText(segment(0, first));
+            m_code_second->setText(segment(first, m_length - first));
+            const char current = Characters[m_group][m_character];
+            const char *group_names[] = {
+                tr("Digits", "数字"), tr("Uppercase", "大写"), tr("Lowercase", "小写"), tr("Symbols", "符号")
+            };
+            const std::string character = current == ' ' ? tr("Space", "空格") : std::string(1, current);
+            m_picker->setValue(character + "  ·  " + group_names[m_group]);
+            m_feedback->setText(m_message);
+        }
+
+    public:
+        explicit PasscodeGui(const RoomPasscodeHost &host) {
+            std::memcpy(m_change.room, host.room, sizeof(m_change.room));
+        }
+
+        tsl::elm::Element *createUI() override {
+            auto *frame = new tsl::elm::OverlayFrame(tr("Game password", "游戏密码"),
+                std::string(tr("Room ", "房间 ")) + m_change.room);
+            auto *list = new tsl::elm::List();
+            list->addItem(m_visibility = new tsl::elm::CategoryHeader(""));
+            list->addItem(m_code_first = new tsl::elm::ListItem(""));
+            list->addItem(m_code_second = new tsl::elm::ListItem(""));
+            list->addItem(m_picker = new tsl::elm::ListItem(tr("Character", "字符")));
+            list->addItem(new tsl::elm::ListItem(tr("←/→ Choose   A Add", "←/→ 选择   A 添加")));
+            list->addItem(new tsl::elm::ListItem(tr("L/R Group   Y Delete", "L/R 字符组   Y 删除")));
+            list->addItem(new tsl::elm::ListItem(tr("X Mode   + Save   − Clear", "X 模式   + 保存   − 清除")));
+            list->addItem(m_feedback = new tsl::elm::ListItem(""));
+            frame->setContent(list);
+            redraw();
+            return frame;
+        }
+
+        bool handleInput(u64 down, u64, const HidTouchState &, HidAnalogStickState, HidAnalogStickState) override {
+            if (!down || (down & HidNpadButton_B)) return false;
+            m_message = "";
+            if (down & HidNpadButton_Plus) {
+                submit(false);
+            } else if (down & HidNpadButton_Minus) {
+                submit(true);
+            } else if (down & HidNpadButton_X) {
+                m_hidden = !m_hidden;
+            } else if (down & HidNpadButton_Y) {
+                if (m_length) m_change.passcode[--m_length] = '\0';
+            } else if (down & HidNpadButton_A) {
+                if (m_length < sizeof(m_change.passcode))
+                    m_change.passcode[m_length++] = Characters[m_group][m_character];
+                else
+                    m_message = tr("Maximum 24 characters.", "最多 24 个字符。");
+            } else if (down & (HidNpadButton_L | HidNpadButton_R)) {
+                m_group = cycle(m_group, down & HidNpadButton_R ? 1 : -1, Characters.size());
+                m_character = 0;
+            } else if (down & (HidNpadButton_AnyLeft | HidNpadButton_AnyRight)) {
+                m_character = cycle(m_character, down & HidNpadButton_AnyRight ? 1 : -1, Characters[m_group].size());
+            } else {
+                return false;
+            }
+            redraw();
+            return true;
+        }
+    };
+
     class MainGui : public tsl::Gui {
-        tsl::elm::ListItem *m_connection{}, *m_room{}, *m_players{}, *m_match{}, *m_notice{};
+        tsl::elm::List *m_list{};
+        tsl::elm::ListItem *m_connection{}, *m_room{}, *m_players{}, *m_match{}, *m_notice{}, *m_password{};
         SafeToggle *m_enabled{}, *m_logging{};
+
+        void updatePasswordAction() {
+            if (hasPasscodeHost() && !m_password) {
+                m_password = new tsl::elm::ListItem(tr("Game password", "游戏密码"));
+                m_password->setClickListener([](u64 keys) {
+                    if (!(keys & HidNpadButton_A)) return false;
+                    refresh();
+                    if (hasPasscodeHost()) {
+                        tsl::changeTo<PasscodeGui>(g_passcode_host);
+                    } else {
+                        g_notice = tr("Room closed or changed.", "房间已关闭或变化。");
+                        g_notice_until = armGetSystemTick() + 5 * armGetSystemTickFreq();
+                    }
+                    return true;
+                });
+                m_list->addItem(m_password, 0, 5);
+            } else if (!hasPasscodeHost() && m_password) {
+                if (getFocusedElement() == m_password) {
+                    removeFocus();
+                    restoreFocus();
+                }
+                m_list->removeItem(m_password);
+                m_password = nullptr;
+            }
+        }
+
     public:
         tsl::elm::Element *createUI() override {
             auto *frame = new tsl::elm::OverlayFrame("LANywhere", GITDESCVER);
-            auto *list = new tsl::elm::List();
+            auto *list = m_list = new tsl::elm::List();
             list->addItem(new tsl::elm::CategoryHeader(tr("Current session", "当前连接")));
             list->addItem(m_connection = new tsl::elm::ListItem(tr("Connection", "连接")));
             list->addItem(m_room = new tsl::elm::ListItem(tr("Room", "房间")));
@@ -169,6 +350,7 @@ namespace {
         void update() override {
             if (armGetSystemTick() - g_last_poll >= armGetSystemTickFreq()) refresh();
             if (!g_notice.empty() && armGetSystemTick() >= g_notice_until) g_notice.clear();
+            updatePasswordAction();
             m_connection->setValue(connectionLabel(), !g_snapshot.relay_ok);
             const bool room = g_snapshot.relay_ok && g_snapshot.status.state == 2;
             m_room->setValue(room ? g_snapshot.status.code : "—", !room);
@@ -195,14 +377,10 @@ namespace {
     class Overlay : public tsl::Overlay {
     public:
         void initServices() override {
-            tsl::hlp::doWithSmSession([] {
-                if (R_SUCCEEDED(setInitialize())) {
-                    u64 code = 0; SetLanguage language = SetLanguage_ENUS;
-                    if (R_SUCCEEDED(setGetSystemLanguage(&code)) && R_SUCCEEDED(setMakeLanguage(code, &language)))
-                        g_chinese = language == SetLanguage_ZHCN || language == SetLanguage_ZHHANS ||
-                                    language == SetLanguage_ZHTW || language == SetLanguage_ZHHANT;
-                    setExit();
-                }
+            tsl::hlp::doWithSDCardHandle([] {
+                bool found = false;
+                g_chinese = chinesePreference("sdmc:/lanywhere/language.ini", &found);
+                if (!found) g_chinese = chinesePreference("sdmc:/lanywhere/language.ini.previous", &found);
             });
             connectServices();
         }

@@ -1,0 +1,384 @@
+#include "appointments.h"
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <vector>
+using u8 = uint8_t;
+using u32 = uint32_t;
+using u64 = uint64_t;
+using s32 = int32_t;
+using s64 = int64_t;
+using Result = int;
+#define R_FAILED(x) ((x) != 0)
+#define R_SUCCEEDED(x) ((x) == 0)
+struct Stop {};
+struct TimeSpan {
+    s64 millis;
+    static TimeSpan FromSeconds(s64 x) { return {x * 1000}; }
+    bool operator>=(TimeSpan x) const { return millis >= x.millis; }
+};
+static u64 fake_now = 1000000, fake_tick = 0;
+static int wait_seconds = 0, query_calls = 0, worker_starts = 0;
+static bool dir_exists = true, api_enabled = true, flag_exists = false, fail_clock = false;
+static std::string locale = "language=zh\n";
+namespace os {
+struct SdkMutex {
+    std::mutex m;
+    void lock() { m.lock(); }
+    void unlock() { m.unlock(); }
+};
+struct SdkConditionVariable {
+    void Wait(SdkMutex &) { throw Stop{}; }
+    void TimedWait(SdkMutex &, TimeSpan t) {
+        wait_seconds = (int)(t.millis / 1000);
+        throw Stop{};
+    }
+    void Signal() {}
+};
+struct Tick {
+    u64 ms;
+    TimeSpan ToTimeSpan() const { return {(s64)ms}; }
+};
+Tick operator-(Tick a, Tick b) { return {a.ms - b.ms}; }
+Tick GetSystemTick() { return {fake_tick}; }
+struct ThreadType {};
+constexpr size_t MemoryPageSize = 4096;
+int CreateThread(ThreadType *, void (*)(void *), void *, void *, size_t, int) { return 0; }
+void StartThread(ThreadType *) { ++worker_starts; }
+} // namespace os
+namespace ams::time {
+struct PosixTime {
+    long long value;
+};
+int Initialize() { return fail_clock ? 1 : 0; }
+int Finalize() { return 0; }
+struct StandardUserSystemClock {
+    static int GetCurrentTime(PosixTime *p) {
+        p->value = (long long)fake_now;
+        return 0;
+    }
+};
+} // namespace ams::time
+namespace fs {
+enum DirectoryEntryType { DirectoryEntryType_Directory, DirectoryEntryType_File };
+enum OpenMode { OpenMode_Read, OpenMode_Write };
+enum WriteOption { Flush };
+using FileHandle = std::string;
+struct ResultPathNotFound { static bool Includes(Result result) { return result == 1; } };
+static bool fail_subscription_commit = false;
+static std::map<std::string, std::string> files;
+int GetEntryType(DirectoryEntryType *t, const char *p) {
+    std::string s = p;
+    if (s == "sdmc:/config/ultrahand/notifications" && dir_exists) {
+        *t = DirectoryEntryType_Directory;
+        return 0;
+    }
+    if (s == "sdmc:/config/ultrahand/flags/NOTIFICATIONS.flag" && api_enabled) {
+        *t = DirectoryEntryType_File;
+        return 0;
+    }
+    if (s == "sdmc:/config/ultrahand/flags/notifications/LANywhere.flag" && flag_exists) {
+        *t = DirectoryEntryType_File;
+        return 0;
+    }
+    if (files.count(s)) {
+        *t = DirectoryEntryType_File;
+        return 0;
+    }
+    return 1;
+}
+int OpenFile(FileHandle *h, const char *p, OpenMode) {
+    if (!files.count(p))
+        return 1;
+    *h = p;
+    return 0;
+}
+int ReadFile(size_t *n, const FileHandle &h, size_t off, void *dst, size_t max) {
+    auto &s = files[h];
+    *n = std::min(max, s.size() - std::min(off, s.size()));
+    std::memcpy(dst, s.data() + off, *n);
+    return 0;
+}
+int GetFileSize(s64 *size, const FileHandle &h) {
+    *size = static_cast<s64>(files.at(h).size());
+    return 0;
+}
+void CloseFile(const FileHandle &) {}
+int DeleteFile(const char *p) { return files.erase(p) ? 0 : 1; }
+int CreateFile(const char *p, size_t n) {
+    if (files.count(p))
+        return 1;
+    files[p].resize(n);
+    return 0;
+}
+int WriteFile(const FileHandle &h, size_t off, const void *data, size_t n, WriteOption) {
+    files[h].replace(off, n, (const char *)data, n);
+    return 0;
+}
+int RenameFile(const char *a, const char *b) {
+    if (!files.count(a))
+        return 1;
+    if (files.count(b) || (fail_subscription_commit && std::string(b) == "sdmc:/lanywhere/appointment-subscriptions.bin"))
+        return 2;
+    files[b] = files[a];
+    files.erase(a);
+    return 0;
+}
+} // namespace fs
+namespace ams::mitm::lanywhere {
+constexpr size_t CodeLength = 6, GroupPageSize = 6;
+constexpr u32 GroupPageEnd = 0xffffffff;
+struct GroupSummaryV2 {
+    char code[8]{};
+    u64 game_id{}, application_id{}, program_id{};
+    u8 players{}, max_players{}, metadata_flags{}, padding[5]{};
+    char host[40]{}, title_en[128]{}, title_zh[128]{};
+};
+struct GroupPageV2 {
+    s32 count;
+    u32 next, capabilities, reserved;
+};
+struct Status {
+    char code[8]{};
+};
+int FindGroupSummaries(u32, GroupPageV2 *, GroupSummaryV2 *, size_t, u64, bool, bool = false);
+void GetStatus(Status *);
+u32 SetAppointmentWatch(const AppointmentWatchRequest &, bool);
+void CancelAppointmentReady(u64);
+} // namespace ams::mitm::lanywhere
+@ACTUAL_SOURCE@
+namespace ams::mitm::lanywhere {
+static std::vector<GroupSummaryV2> fixture_rooms, secondary_rooms;
+static std::vector<u64> polled_games;
+static Status current_status;
+static std::function<void()> on_query;
+int FindGroupSummaries(u32 offset, GroupPageV2 *p, GroupSummaryV2 *out, size_t capacity, u64 game, bool self, bool) {
+    assert(capacity == 6 && self && (game == 42 || game == 43));
+    query_calls++;
+    polled_games.push_back(game);
+    if (on_query) {
+        auto fn = on_query;
+        on_query = {};
+        fn();
+    }
+    const auto &available = game == 42 ? fixture_rooms : secondary_rooms;
+    const size_t n = std::min(size_t(6), available.size() - std::min(static_cast<size_t>(offset), available.size()));
+    for (size_t i = 0; i < n; ++i) out[i] = available[offset + i];
+    p->count = static_cast<s32>(n);
+    p->next = offset + n < available.size() ? offset + static_cast<u32>(n) : GroupPageEnd;
+    return (int)n;
+}
+void GetStatus(Status *s) { *s = current_status; }
+static GroupSummaryV2 room(const char *code, u64 game, u8 count, u8 max, const char *en, const char *zh) {
+    GroupSummaryV2 r{};
+    std::memcpy(r.code, code, 6);
+    r.game_id = game;
+    r.players = count;
+    r.max_players = max;
+    std::snprintf(r.title_en, sizeof(r.title_en), "%s", en);
+    std::snprintf(r.title_zh, sizeof(r.title_zh), "%s", zh);
+    return r;
+}
+static AppointmentWatchRequest event(u64 id, u64 starts = 1000000) { return {id, starts, 42, 22, 1, 0}; }
+static void worker_step() {
+    try {
+        Worker(nullptr);
+    } catch (const Stop &) {
+    }
+}
+static void restartSubscriptions() {
+    for (auto &watch : g_subscriptions) watch = {};
+    g_subscription_count = 0;
+    g_next_poll = 0;
+    g_subscriptions_loaded = false;
+    g_primary_valid = false;
+    g_worker_started = false;
+    InitializeAppointmentSubscriptions();
+}
+static void assertSubscriptions(std::initializer_list<u64> expected) {
+    AppointmentSubscriptions view{};
+    GetAppointmentSubscriptions(&view);
+    assert(view.count == expected.size() && !view.reserved);
+    assert(std::equal(expected.begin(), expected.end(), view.ids));
+    assert(std::all_of(view.ids + view.count, view.ids + APPOINTMENT_SUBSCRIPTION_LIMIT,
+                       [](u64 id) { return id == 0; }));
+}
+static void testSubscriptions() {
+    fake_now = 1000000;
+    api_enabled = false;
+    assert(SetAppointmentSubscription(event(101)) == AppointmentOk);
+    assert(SetAppointmentSubscription(event(102)) == AppointmentOk);
+    assert(SetAppointmentSubscription(event(101)) == AppointmentOk);
+    assertSubscriptions({101, 102});
+    assert(!fs::files.count(NotificationPath));
+    const int prior_starts = worker_starts;
+    restartSubscriptions();
+    assert(worker_starts == prior_starts + 1);
+    assertSubscriptions({101, 102});
+
+    api_enabled = true;
+    assert(SetAppointmentWatch(event(101), false) == AppointmentOk);
+    CancelAppointmentReady(101);
+    assert(GetAppointmentWatch() == 0);
+    assertSubscriptions({101, 102});
+
+    fs::fail_subscription_commit = true;
+    assert(SetAppointmentSubscription(event(103)) == AppointmentStorage);
+    assert(!fs::files.count(SubscriptionsPath) && fs::files.count(PreviousSubscriptionsPath));
+    assertSubscriptions({101, 102});
+    fs::fail_subscription_commit = false;
+    restartSubscriptions();
+    assertSubscriptions({101, 102});
+    assert(SetAppointmentSubscription(event(103)) == AppointmentOk);
+    assertSubscriptions({101, 102, 103});
+    assert(SetAppointmentSubscription(event(104)) == AppointmentOk);
+    fs::files[SubscriptionsPath].resize(10);
+    restartSubscriptions();
+    assertSubscriptions({101, 102, 103});
+
+    auto remove = event(102);
+    remove.enabled = 0;
+    assert(SetAppointmentSubscription(remove) == AppointmentOk);
+    assertSubscriptions({101, 103});
+    restartSubscriptions();
+    assertSubscriptions({101, 103});
+
+    auto other = event(103);
+    other.game_id = 43;
+    assert(SetAppointmentSubscription(other) == AppointmentOk);
+    assert(SetAppointmentSubscription(event(105)) == AppointmentOk);
+    fixture_rooms = {room("ONE042", 42, 1, 4, "Forty Two", "四十二")};
+    secondary_rooms = {room("ONE043", 43, 1, 4, "Forty Three", "四十三")};
+    polled_games.clear();
+    worker_step();
+    assert(wait_seconds == 1 && polled_games == std::vector<u64>{42});
+    assert(fs::files[NotificationPath].find("四十二") != std::string::npos);
+    worker_step();
+    assert((polled_games == std::vector<u64>{42, 43}));
+    assert(fs::files[NotificationPath].find("四十三") != std::string::npos);
+    worker_step();
+    assert((polled_games == std::vector<u64>{42, 43, 42}));
+    assert(!fs::files.count(NotificationPath)); // One real room, two same-game appointments.
+
+    for (u64 id = 200; id < 200 + APPOINTMENT_SUBSCRIPTION_LIMIT - 3; ++id)
+        assert(SetAppointmentSubscription(event(id)) == AppointmentOk);
+    assert(SetAppointmentSubscription(event(999)) == AppointmentLimit);
+    remove = event(200);
+    remove.enabled = 0;
+    assert(SetAppointmentSubscription(remove) == AppointmentOk);
+    assert(SetAppointmentSubscription(event(999)) == AppointmentOk);
+    fake_now += APPOINTMENT_ACTIVE_SECONDS;
+    worker_step();
+    assertSubscriptions({});
+    restartSubscriptions();
+    assertSubscriptions({});
+}
+int run() {
+    fs::files[LocalePath] = locale;
+    api_enabled = false;
+    assert(SetAppointmentWatch(event(1), true) == APPOINTMENT_ALERTS_DISABLED);
+    assert(GetAppointmentWatch() == 0);
+    api_enabled = true;
+    assert(SetAppointmentWatch(event(1), false) == AppointmentOk);
+    assert(GetAppointmentWatch() == 1);
+    dir_exists = false;
+    query_calls = 0;
+    Poll(g_watch.event, g_generation);
+    assert(query_calls == 0);
+    dir_exists = true;
+    flag_exists = true;
+    Poll(g_watch.event, g_generation);
+    assert(query_calls == 0);
+    flag_exists = false;
+    std::memcpy(current_status.code, "OWN123", 6);
+    auto different = room("DIFF01", 42, 1, 4, "different", "不同游戏");
+    different.metadata_flags = 1;
+    different.application_id = 23;
+    fixture_rooms = {room("WRONG1", 43, 1, 4, "wrong", "错误"),
+                     room("FULL01", 42, 4, 4, "full", "已满"),
+                     room("EMPTY1", 42, 0, 4, "empty", "空"),
+                     room("OWN123", 42, 1, 4, "self", "自己"),
+                     different,
+                     room("GOOD01", 42, 1, 4, "English", "猎人\"\\测试")};
+    Poll(g_watch.event, g_generation);
+    assert(query_calls == 1);
+    assert(fs::files.count(NotificationPath));
+    std::puts(fs::files[NotificationPath].c_str());
+    fs::files.erase(NotificationPath);
+    Poll(g_watch.event, g_generation);
+    assert(!fs::files.count(NotificationPath)); // duplicate suppressed
+    fixture_rooms.push_back(room("GOOD02", 42, 1, 4, "Other", "另一个"));
+    Poll(g_watch.event, g_generation);
+    assert(fs::files.count(NotificationPath));
+    assert(SetAppointmentWatch(event(2), false) == AppointmentOk);
+    assert(!fs::files.count(NotificationPath));
+    assert(GetAppointmentWatch() == 2);
+    on_query = []() { CancelAppointmentReady(2); };
+    Poll(g_watch.event, g_generation);
+    assert(GetAppointmentWatch() == 0 && !fs::files.count(NotificationPath));
+    assert(SetAppointmentWatch(event(3), false) == AppointmentOk);
+    assert(SetAppointmentWatch(event(3), true) == AppointmentOk);
+    CancelAppointmentReady(3);
+    assert(GetAppointmentWatch() == 3);
+    auto cancel = event(3);
+    cancel.enabled = 0;
+    assert(SetAppointmentWatch(cancel, false) == AppointmentOk);
+    assert(GetAppointmentWatch() == 0);
+    assert(IsExpired(1000000, 1007201));
+    assert(IsExpired(1000000, 1007200));
+    assert(!IsExpired(1000000, 1007199));
+
+    fake_now = 1007199;
+    assert(SetAppointmentWatch(event(6), false) == AppointmentOk);
+    fixture_rooms = {room("LATE01", 42, 1, 4, "late", "过期")};
+    on_query = []() { ++fake_now; };
+    Poll(g_watch.event, g_generation);
+    assert(!fs::files.count(NotificationPath));
+    fake_now = 1000000;
+
+    assert(SetAppointmentWatch(event(7), false) == AppointmentOk);
+    fixture_rooms.clear();
+    for (int i = 0; i < 18; i++) {
+        char code[8];
+        std::snprintf(code, sizeof(code), "%06d", i);
+        fixture_rooms.push_back(room(code, 42, 4, 4, "full", "已满"));
+    }
+    fixture_rooms.push_back(room("LAST19", 42, 1, 4, "later", "后面的房间"));
+    query_calls = 0;
+    Poll(g_watch.event, g_generation);
+    assert(query_calls == 3 && !fs::files.count(NotificationPath));
+    Poll(g_watch.event, g_generation);
+    assert(query_calls == 4 && fs::files.count(NotificationPath));
+    cancel = event(7);
+    cancel.enabled = 0;
+    assert(SetAppointmentWatch(cancel, false) == AppointmentOk);
+    fake_now = 1000000;
+    assert(SetAppointmentWatch(event(4, fake_now + 1860), false) == AppointmentOk);
+    query_calls = 0;
+    worker_step();
+    assert(wait_seconds == 30 && query_calls == 0);
+    fake_now += 59;
+    worker_step();
+    assert(wait_seconds == 1 && query_calls == 0);
+    fake_now += 2;
+    fixture_rooms.clear();
+    query_calls = 0;
+    worker_step();
+    assert(wait_seconds == 5 && query_calls == 1);
+    fake_now = 1000000 + 1860 + 7200;
+    worker_step();
+    assert(GetAppointmentWatch() == 0);
+    testSubscriptions();
+    std::puts("PASS: actual notifier filtering, fair multi-event polling, persistence/rollback, independent Ready and expiry");
+    return 0;
+}
+} // namespace ams::mitm::lanywhere
+int main() { return ams::mitm::lanywhere::run(); }

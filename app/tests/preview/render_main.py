@@ -16,9 +16,9 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parent.parent / 'source'
-FUNCTIONS = ['tr_error', 'clean_nickname', 'button_mask', 'add_zone', 'draw_language_control', 'touch_action_at', 'show_matching', 'supports_reserved', 'match_state_text', 'list_error_title', 'status_pill', 'seats',
-             'local_game_info', 'room_catalog_match', 'game_info_has_lcid', 'room_title', 'display_game_icon', 'room_title_note', 'group_card', 'matching_column', 'network_offline_hint', 'list_error_hint', 'groups_column', 'can_change_visibility', 'can_change_provider', 'provider_label', 'provider_column', 'private_column',
-             'side_column', 'draw', 'draw_no_service']
+FUNCTIONS = ['tr_error', 'clean_nickname', 'button_mask', 'add_zone', 'draw_language_control', 'touch_action_at', 'show_matching', 'supports_reserved', 'is_self_network', 'can_enter_game_password', 'room_password_allows_launch', 'match_state_text', 'list_error_title', 'status_pill', 'seats',
+             'local_game_info', 'room_catalog_match', 'game_info_has_lcid', 'room_title', 'display_game_icon', 'room_title_note', 'provider_label', 'group_card', 'matching_column', 'network_offline_hint', 'list_error_hint', 'groups_column', 'can_change_visibility', 'can_change_provider', 'is_self_room_context', 'can_share_game_password', 'provider_column', 'private_column',
+             'appointment_entry_available', 'lobby_guide_available', 'side_column', 'draw_password_visibility', 'draw', 'draw_no_service']
 
 
 def block_end(source, start):
@@ -89,6 +89,8 @@ static LobbyRoomId g_rendered_rooms[LOBBY_PAGE_SIZE];
 static GameInfo sample_games[2];
 static const char *output_path;
 static unsigned failures;
+static bool appointments_active(void) { return false; }
+static void appointments_draw(const GameCatalog *catalog, void (*touch)(int,int,int,int,u64)) { (void)catalog; (void)touch; }
 static const GameInfo *game_info(u64 id) {
     if (!id) return NULL;
     if (id == 0x0100ABF008968000ULL) {

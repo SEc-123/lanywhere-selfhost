@@ -34,6 +34,7 @@ extern "C" {
 #include "ldnmitm_service.hpp"
 #include "bsd_spy.hpp"
 #include "lanywhere_service.hpp"
+#include "appointment_notifier.hpp"
 
 namespace ams {
 
@@ -251,6 +252,7 @@ namespace ams {
     void Main() {
         R_ABORT_UNLESS(log::Initialize());
         LogFormat("main");
+        mitm::lanywhere::InitializeAppointmentSubscriptions();
 
         constexpr sm::ServiceName MitmServiceName = sm::ServiceName::Encode("ldn:u");
         //sf::hipc::ServerManager<2, LdnMitmManagerOptions, 3> server_manager;

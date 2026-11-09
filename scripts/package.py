@@ -122,26 +122,28 @@ def package_files(version, server, port, embedded):
     if embedded is not None:
         setup = (
             "应用启动后会自动连接内置的联机服务器，显示大厅或连接状态。\n"
-            "玩家无需填写 IP 或端口。此安装包保留已有的昵称和公开房间偏好。"
+            "玩家无需填写 IP 或端口。原有昵称和网络设置会保留。"
         )
     elif server is not None:
         setup = f"打开应用，确认服务器显示为 {server}:{port}。"
     entries["lanywhere/INSTALL.zh-CN.txt"] = (
         f"Switch Online {version}（Beta，跨网真机验收待完成）\n\n"
         "安装：将包内文件合并到 SD 卡根目录，保留游戏、存档和 config.ini，重启进入虚拟系统。\n"
-        "打开：相册 → LANywhere Self-host。启动显示教程，B 进入大厅，R 随时重看。\n"
+        "从相册打开 LANywhere Self-host。启动后显示约局，B 进入房间大厅。\n"
         f"{setup}\n"
-        "公开房：确认大厅“游戏建房”为公开（X 切换），再到游戏的“本地无线”创建房间。\n"
-        "加入公开房：大厅选房按 A；外部网络按提示进游戏手动搜索，房间未预留。\n"
-        "好友私房：仅自有网络/公共社区。大厅按 Y，再按 A 创建；好友按 X 输入码。\n"
-        "LAN Play 使用游戏内本地无线房间，无邀请码；双方选择同一网络。\n"
-        "按 + 回游戏会保留连接；B 用于返回、取消选择或离开私房。\n"
+        "右下角“查看教程”可随时打开，也可按十字键右。在大厅按十字键左回到约局。\n"
+        "首页点每场的“参加”，或按 A 参加选中的一场。可参加多场，再点一次取消。\n"
+        "按 L 进入发起页面并选择游戏和时间。临近开场按 Y 准备，按 X 查看自有网络房间。\n"
+        "约局开场后保留 2 小时，到期会从列表消失。\n"
+        "在游戏内用“本地无线”建房。新房默认使用自有网络。\n"
+        "房主在主应用按 Y 设置游戏密码。隐藏密码时，房间仍可见，访客要先输入密码。\n"
+        "同一大厅显示各线路的房间。按 A 选房后会使用该房间的线路，再回游戏搜索。\n"
         "所有人安装同一新版插件，尽量使用同一游戏版本。\n\n"
         "适用基线为 Atmosphère 1.12.x。安装后需要用具体固件和游戏做真机验证。\n"
         "上游源码及作者信息 https://github.com/augustocco/lanywhere\n"
     ).encode("utf-8")
     if embedded is not None:
-        connection_zh = "   服务器地址已内置，无需输入地址或端口；原有昵称和公开偏好会保留。"
+        connection_zh = "   服务器地址已内置，无需输入地址或端口。原有昵称和网络设置会保留。"
         connection_en = "   The server is built in; no address or port setup is needed. Existing preferences are kept."
     elif server is not None:
         connection_zh = "   服务器配置随包提供，复制时请留意保留已有昵称和偏好。"

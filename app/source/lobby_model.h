@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "../../common/list_status.h"
+#include "../../common/room_passcode.h"
+#include "../../common/unified_lobby.h"
 
 #define LANYWHERE_IPC_MAJOR 5
 #define LANYWHERE_IPC_CAPABILITIES_COMMAND 10
@@ -20,13 +22,24 @@ typedef struct {
     uint64_t game_id;
     uint64_t application_id, program_id;
     uint8_t players, max_players, metadata_flags;
-    uint8_t padding[5];
+    uint8_t room_access, padding[4];
     char host[40];
     char title_en[128], title_zh[128];
 } LobbyGroup;
 _Static_assert(sizeof(LobbyGroup) == 336 && offsetof(LobbyGroup,application_id)==16 &&
-               offsetof(LobbyGroup,players)==32 && offsetof(LobbyGroup,host)==40 &&
+               offsetof(LobbyGroup,players)==32 && offsetof(LobbyGroup,room_access)==35 && offsetof(LobbyGroup,host)==40 &&
                offsetof(LobbyGroup,title_en)==80 && offsetof(LobbyGroup,title_zh)==208, "GroupSummaryV2 IPC layout");
+
+typedef char LobbySource[UNIFIED_LOBBY_PROVIDER_SIZE];
+typedef struct {
+    LobbyGroup group;
+    LobbySource provider;
+    uint8_t reserved[7];
+} LobbyUnifiedGroup;
+_Static_assert(sizeof(LobbyUnifiedGroup) == UNIFIED_LOBBY_GROUP_SIZE &&
+               offsetof(LobbyUnifiedGroup, provider) == 336, "unified room row IPC layout");
+
+enum LobbyDiscovery { LobbyDiscoveryUnknown, LobbyDiscoveryUnified, LobbyDiscoveryLegacy };
 
 typedef struct {
     int32_t count;
@@ -54,10 +67,31 @@ _Static_assert(offsetof(LobbyMatch, room) == 16 && offsetof(LobbyMatch, error) =
 typedef struct {
     char code[8];
     uint64_t game_id;
+    LobbySource provider;
 } LobbyRoomId;
 
+typedef struct {
+    LobbyRoomId room;
+    char value[ROOM_PASSCODE_MAX + 1];
+    uint64_t refresh_at;
+    bool pending, failed, locked, unlocked;
+} RoomPasswordView;
+
+typedef struct {
+    RoomPasscodeChange change;
+    bool active;
+} RoomPasswordEdit;
+
+bool lobby_room_full(const LobbyGroup *group);
+int lobby_next_selectable_room(const LobbyGroup *groups, int count, int current, int direction);
+
 LobbyRoomId lobby_room_id(const LobbyGroup *group);
+LobbyRoomId lobby_room_id_on(const LobbyGroup *group, const char *provider);
 int lobby_room_index(LobbyRoomId id, const LobbyGroup *groups, size_t count);
+int lobby_room_index_on(LobbyRoomId id, const LobbyGroup *groups, const LobbySource *providers, size_t count);
+bool lobby_room_equal(LobbyRoomId left, LobbyRoomId right);
+bool lobby_unified_page_valid(UnifiedPage page, UnifiedRoomsRequest request,
+                              const LobbyUnifiedGroup *rows, size_t capacity);
 void lobby_sanitize_group(LobbyGroup *group);
 bool lobby_application_matches(const LobbyGroup *group, uint64_t local_application_id, const uint64_t local_lcids[8]);
 bool lobby_response_is_current(unsigned generation, uint32_t offset, const char *provider,

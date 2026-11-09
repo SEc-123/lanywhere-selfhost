@@ -3,7 +3,7 @@
 const { performance } = require('node:perf_hooks');
 
 const TICKET_BYTES = 16;
-const REQUEST_BYTES = 122;
+const REQUEST_BYTES = 122, GRANT_BYTES = 16;
 const STATUS = { WAITING: 0, ASSIGNED: 1, CLOSED: 2, JOINED: 3 };
 const FLAG = { GAME: 0x01, SESSION: 0x02, TYPE: 0x04, SSID: 0x10, SCENE: 0x20 };
 const SCAN_FLAGS = 0x37;
@@ -33,19 +33,21 @@ function discoveryRequest(body) {
 // ScanFilter is 96 bytes. NetworkInfo uses the same NetworkId but a different
 // CommonNetworkInfo layout. The version is in the host's NodeInfo, not in ScanFilter.
 function request(body) {
-    if (body.length !== REQUEST_BYTES) return null;
+    if (![REQUEST_BYTES, REQUEST_BYTES + GRANT_BYTES].includes(body.length)) return null;
     const ticket = key(body.subarray(0, TICKET_BYTES));
     const filter = body.subarray(TICKET_BYTES, 112);
     const hasVersion = body[112];
     const features = body[115];
     const criteria = scanCriteria(filter, features);
-    const rawTarget = body.subarray(116);
+    const rawTarget = body.subarray(116, REQUEST_BYTES);
     const target = rawTarget.some(Boolean) ? rawTarget.toString('latin1') : '';
     if (!ticket || !criteria || hasVersion > 1 || (target && !/^[A-HJ-NP-Z2-9]{6}$/.test(target))) return null;
+    const grant = body.length > REQUEST_BYTES ? key(body.subarray(REQUEST_BYTES)) : null;
+    if (body.length > REQUEST_BYTES && (!grant || !target)) return null;
     const { gameId, scene, session, type, ssid } = criteria;
     const version = hasVersion ? body.readUInt16LE(113) : null;
-    const signature = JSON.stringify([String(gameId), target, features, version, scene, session?.toString('hex'), type, ssid?.toString('hex')]);
-    return { ticket, signature, gameId, target, features, version, scene, session, type, ssid };
+    const signature = JSON.stringify([String(gameId), target, features, version, scene, session?.toString('hex'), type, ssid?.toString('hex'), grant]);
+    return { ticket, signature, gameId, target, features, version, scene, session, type, ssid, grant };
 }
 
 function key(ticket) {
@@ -72,7 +74,7 @@ function groupIdentity(info) {
 }
 
 function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, perIpLimit = 8, recentPerIp = 32,
-                  maxWaitingPerGame = 256 }) {
+                  maxWaitingPerGame = 256, roomByCode = () => null, access = () => true }) {
     const tickets = new Map();
     const queueByGame = new Map();
     const holdsByRoom = new Map();
@@ -119,7 +121,10 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
     }
 
     function close(ticket, now) {
-        if (ticket.state === STATUS.WAITING || ticket.state === STATUS.ASSIGNED) deactivate(ticket);
+        if (ticket.state === STATUS.WAITING || ticket.state === STATUS.ASSIGNED) {
+            if (ticket.criteria.grant) access(roomByCode(ticket.criteria.target), ticket.criteria, ticket.ownerIp, 'release');
+            deactivate(ticket);
+        }
         if (ticket.member) joinedByMember.delete(ticket.member);
         ticket.member = null;
         ticket.state = STATUS.CLOSED;
@@ -142,7 +147,8 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
             }
             let best;
             for (const candidate of available) {
-                if (candidate.remaining <= 0 || !matches(candidate.room, ticket.criteria)) continue;
+                if (candidate.remaining <= 0 || !matches(candidate.room, ticket.criteria) ||
+                    !access(candidate.room, ticket.criteria, ticket.ownerIp)) continue;
                 if (!best || candidate.size > best.size || (candidate.size === best.size && candidate.room.code < best.room.code))
                     best = candidate;
             }
@@ -161,7 +167,9 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
     }
 
     function expire(ticket, now) {
-        if (ticket.until > now) return false;
+        const requiresGrant = ticket.criteria?.grant && (ticket.state === STATUS.WAITING || ticket.state === STATUS.ASSIGNED);
+        if (ticket.until > now && (!requiresGrant || access(roomByCode(ticket.criteria.target), ticket.criteria, ticket.ownerIp)))
+            return false;
         if (ticket.state === STATUS.CLOSED) {
             tickets.delete(ticket.key);
             changeCount(retainedByIp, ticket.ownerIp, -1);
@@ -199,6 +207,7 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
         }
         if (!canRetain(ip) || (activeByIp.get(ip) ?? 0) >= perIpLimit ||
             (queueByGame.get(criteria.gameId)?.size ?? 0) >= maxWaitingPerGame) return { error: 'busy' };
+        if (criteria.grant && !access(roomByCode(criteria.target), criteria, ip, 'bind')) return { error: 'missing' };
         ticket = { key: criteria.ticket, criteria, ownerIp: ip, state: STATUS.WAITING, until: now + waitMs, room: null };
         retain(ticket);
         changeCount(activeByIp, ip, 1);
@@ -241,7 +250,8 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
         if (ticket.state === STATUS.JOINED && ticket.member.room === room && ticket.claimVersion === version &&
             ticket.criteria.features === networkFeatures) return { member: ticket.member };
         if (!held || ticket.room !== room || ticket.criteria.features !== networkFeatures) return { error: 'missing' };
-        if (capacity(room) <= 0 || !matches(room, ticket.criteria) || !ticket.identity.equals(groupIdentity(room.published.info))) {
+        if (capacity(room) <= 0 || !matches(room, ticket.criteria) || !access(room, ticket.criteria, ticket.ownerIp) ||
+            !ticket.identity.equals(groupIdentity(room.published.info))) {
             close(ticket, now);
             allocate(ticket.criteria.gameId, now);
             return { error: 'missing' };
@@ -263,7 +273,7 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
         joinedByMember.set(member, ticket);
     }
 
-    function roomChanged(room) {
+    function roomChanged(room, accessChanged = false) {
         const now = performance.now();
         let remaining = capacity(room);
         const identity = remaining > 0 ? groupIdentity(room.published.info) : null;
@@ -273,14 +283,15 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
         roomAvailability.set(room, { capacity: remaining, identity });
         let released = false;
         for (const ticket of holdsByRoom.get(room) ?? []) {
-            if (ticket.until <= now || remaining === 0 || !matches(room, ticket.criteria) || !ticket.identity.equals(identity)) {
+            if (ticket.until <= now || remaining === 0 || !matches(room, ticket.criteria) ||
+                !access(room, ticket.criteria, ticket.ownerIp) || !ticket.identity.equals(identity)) {
                 close(ticket, now);
                 released = true;
             } else {
                 remaining--;
             }
         }
-        if (changed || released) allocate(room.gameId, now);
+        if (changed || released || accessChanged) allocate(room.gameId, now);
     }
 
     function memberLeft(member) {

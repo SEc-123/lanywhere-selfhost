@@ -24,7 +24,8 @@ enum {
     HidNpadButton_Y = 1u << 3, HidNpadButton_L = 1u << 6, HidNpadButton_R = 1u << 7,
     HidNpadButton_StickR = 1u << 5, HidNpadButton_StickL = 1u << 4,
     HidNpadButton_ZL = 1u << 8, HidNpadButton_ZR = 1u << 9,
-    HidNpadButton_Plus = 1u << 10, HidNpadButton_Minus = 1u << 11
+    HidNpadButton_Plus = 1u << 10, HidNpadButton_Minus = 1u << 11,
+    HidNpadButton_Left = 1u << 12, HidNpadButton_Right = 1u << 13
 };
 void *nwindowGetDefault(void);
 Result framebufferCreate(Framebuffer *, void *, u32, u32, int, int);

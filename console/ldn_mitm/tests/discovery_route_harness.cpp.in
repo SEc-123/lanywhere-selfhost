@@ -81,6 +81,7 @@ static int ResultRelayFailed(){return 1;}
 static bool ValidCode(const char *code){if(std::strlen(code)!=6)return false;for(int i=0;i<6;i++){char c=code[i];if(!((c>='A'&&c<='Z'&&c!='I'&&c!='O')||(c>='2'&&c<='9')))return false;}return true;}
 /* ACTUAL_LOAD */
 /* ACTUAL_RESOLVE */
+/* ACTUAL_SELECTION */
 /* ACTUAL_CHOOSE */
 /* ACTUAL_CAPTURE */
 /* ACTUAL_CURRENT */
@@ -136,6 +137,14 @@ static int found_count=0;static void found(const char *code,const void *info,voi
 int main(){
  std::signal(SIGPIPE,SIG_IGN);
  unsigned checks=0;
+ {
+  DiscoveryRoute route{};
+  config(9,"self",false);
+  assert(CaptureDiscoveryRoute(&route) && route.public_enabled);
+  config(9,"lanywhere-public",false);
+  assert(CaptureDiscoveryRoute(&route) && !route.public_enabled);
+  checks+=2;
+ }
  if (RELAY_PROFILE_FIXED) {
   fs::files.clear();DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route)&&std::string(route.provider)=="self"&&route.port==htons(11460));checks++;
   config(9,"lanywhere-public");assert(CaptureDiscoveryRoute(&route)&&std::string(route.provider)=="lanywhere-public"&&route.port==htons(11460));checks++;
@@ -160,6 +169,17 @@ int main(){
   config(relay.port);GameRoute joined{};enter_calls=0;assert(R_SUCCEEDED(JoinRoom("ABC234",42,&route,&joined)));assert(enter_calls==1&&joined.room_token==91&&joined.room_epoch==11&&!std::strcmp(joined.room_code,"ABC234")&&std::string(joined.discovery.provider)=="lanywhere-public");checks++;
   config(other.port,"self");enter_calls=0;assert(R_SUCCEEDED(JoinRoom("ABC234",0,nullptr)));assert(enter_calls==1&&entered_provider=="self"&&entered_server.sin_port==htons(other.port));checks++;
   sockaddr_in fixed{};fixed.sin_family=AF_INET;fixed.sin_port=htons(relay.port);fixed.sin_addr.s_addr=htonl(INADDR_LOOPBACK);sockaddr_in chosen{};char provider[33]{};assert(ChooseEnterRoute(&fixed,nullptr,&chosen,provider)&&std::string(provider)=="self");assert(!ChooseEnterRoute(&fixed,&route,&chosen,provider));checks++;
+ }
+ {
+  Relay relay(0);config(relay.port,"self");DiscoveryRoute route{};
+  assert(CaptureDiscoveryRoute(&route));std::strcpy(route.provider,"lanplay-cn-jax");
+  route.selected_game_id=UINT64_MAX;SelectRouteLocked(route,"ABC234");const auto selected=g_selection;
+  enter_calls=0;
+  assert(R_FAILED(JoinRoom("DEF567",UINT64_MAX,&selected))&&enter_calls==0);
+  assert(R_FAILED(JoinRoom("ABC234",42,&selected))&&enter_calls==0);
+  assert(R_SUCCEEDED(JoinRoom("ABC234",UINT64_MAX,&selected))&&enter_calls==1&&entered_provider=="lanplay-cn-jax");
+  ClearSelectionLocked();
+  assert(R_FAILED(JoinRoom("ABC234",UINT64_MAX,&selected))&&enter_calls==1);checks++;
  }
  {Relay relay(0);relay.expected_provider="lanplay-nl";relay.select_delay_ms=1200;config(relay.port,"lanplay-nl");DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));sockaddr_in server{};char provider[33]{};assert(ResolveDiscoveryRoute(route,&server,provider));const char *error=nullptr;const int fd=ConnectServer(server,&error,100,provider);assert(fd>=0&&relay.connections==1&&relay.selects==1);::close(fd);checks++;}
  {Relay relay(0);relay.expected_provider="lanplay-nl";relay.select_delay_ms=700;config(relay.port,"lanplay-nl");

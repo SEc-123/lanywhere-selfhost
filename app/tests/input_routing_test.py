@@ -49,10 +49,20 @@ def main():
     pieces = {
         'STATUS': status,
         'VIEW': view,
-        'PREDICATES': function(source, 'static bool show_matching(') + '\n' + function(source, 'static bool supports_reserved(') + '\n' + function(source, 'static bool can_change_visibility(') + '\n' + function(source, 'static bool can_change_provider('),
+        'PREDICATES': '\n'.join(function(source, signature) for signature in (
+            'static bool show_matching(', 'static bool supports_reserved(', 'static bool is_self_network(',
+            'static bool is_self_room_context(', 'static bool can_change_visibility(', 'static bool can_change_provider(', 'static bool can_share_game_password(',
+             'static LobbyRoomId room_password_target(', 'static bool can_enter_game_password(',
+            'static bool appointment_entry_available(', 'static bool lobby_guide_available(')),
         'CLEAN_NICKNAME': function(source, 'static bool clean_nickname('),
         'PLUS': between(source, '        if (down & HidNpadButton_Plus)', '        u64 now = now_ms();', loop),
-        'GUIDE': between(source, '        if (g_guide_open) {', '        const int shown =', loop),
+        'GUIDE_INPUT': function(source, 'static bool guide_input('),
+        'FIND_APPOINTMENT_ROOMS': function(source, 'static void open_appointment_rooms('),
+        'SELECT_ROOM': function(source, 'static void select_room('),
+        'START_SCREEN': between(source, '    if (appointment_entry_available(&v)) appointments_open(thread_ok, false);',
+                                '    View last = {0};', loop),
+        'GUIDE': between(source, '        if (guide_input(&v, down)) {', '        if (appointments_active()) {', loop) +
+                 between(source, '        if (v.provider_panel) {', '        const int shown =', loop),
         'SELECTION': between(source, '        const int shown =', '#if !RELAY_PROFILE_FIXED', loop),
         'BUSINESS': between(source, '        if (v.external_confirm) {',
                             '        if (down & (HidNpadButton_A | HidNpadButton_X | HidNpadButton_Y | HidNpadButton_B))', loop),

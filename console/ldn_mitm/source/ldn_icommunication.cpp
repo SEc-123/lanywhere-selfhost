@@ -178,8 +178,6 @@ namespace ams::mitm::ldn {
 
     Result ICommunicationService::Connect(ConnectNetworkData param, const NetworkInfo &data) {
         LogFormat("ICommunicationService::connect");
-        LogHex(&data, sizeof(NetworkInfo));
-        LogHex(&param, sizeof(param));
 
         return lanDiscovery.connect(&data, &param.userConfig, param.localCommunicationVersion);
     }

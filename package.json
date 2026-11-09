@@ -1,6 +1,6 @@
 {
   "name": "lanywhere-selfhost",
-  "version": "0.4.7",
+  "version": "0.5.4",
   "private": true,
   "description": "Self-hosted public multiplayer relay and Switch client, based on LANywhere",
   "license": "GPL-2.0-only",

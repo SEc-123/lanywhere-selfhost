@@ -79,7 +79,7 @@ public:
         return Write(fd,bytes.data(),bytes.size());
     }
     void Enter(const std::vector<uint8_t> *room=nullptr){
-        assert(Send(0x0b));auto reply=Receive();assert(reply.type==0x89&&reply.body.size()==4);caps=Get32(reply.body.data());assert(caps==255);
+        assert(Send(0x0b));auto reply=Receive();assert(reply.type==0x89&&reply.body.size()==4);caps=Get32(reply.body.data());assert((caps & 255u) == 255u);
         std::vector<uint8_t> body(room?47:41);if(room)std::copy(room->begin(),room->end(),body.begin());body.back()=3;
         assert(Send(room?2:1,body.data(),body.size()));reply=Receive();assert(reply.type==0x81&&reply.body.size()>=24);
         code.assign(reply.body.begin(),reply.body.begin()+6);ip=Get32(reply.body.data()+7);token=Get32(reply.body.data()+11);assert(ip&&token);
@@ -131,5 +131,5 @@ int main(int argc,char **argv){
     const auto ap=a.Peak(),bp=b.Peak();const auto ac=a.FinalCredit(),bc=b.FinalCredit();assert(ap.first<=512*1024&&bp.first<=512*1024&&ap.second<=1000&&bp.second<=1000);
     ::close(client);pa.Closed(oa,client);::close(accepted);pb.Closed(ob,accepted);::close(listener);pb.Closed(ob,listener);
     assert(pa.GetMetrics().sockets==0&&pb.GetMetrics().sockets==0);a.Leave();b.Leave();a.Stop();b.Stop();
-    std::cout<<"{\"status\":\"passed\",\"bytes_each_direction\":"<<Amount<<",\"caps\":255,\"member_features\":3,\"slow_reader_delay_ms\":300,\"producer_blocked_before_read\":"<<(producer_blocked?"true":"false")<<",\"peak_outstanding_bytes\":["<<ac<<','<<bc<<"],\"peak_proxy_bytes\":["<<peak_a<<','<<peak_b<<"],\"peak_wire_bytes_per_second\":["<<ap.first<<','<<bp.first<<"],\"peak_frames_per_second\":["<<ap.second<<','<<bp.second<<"],\"busy_or_reset\":0,\"proxy_streams_after\":0,\"game_fd_aliases_after\":0,\"leave_pong\":true}"<<'\n';
+    std::cout<<"{\"status\":\"passed\",\"bytes_each_direction\":"<<Amount<<",\"caps\":"<<a.caps<<",\"member_features\":3,\"slow_reader_delay_ms\":300,\"producer_blocked_before_read\":"<<(producer_blocked?"true":"false")<<",\"peak_outstanding_bytes\":["<<ac<<','<<bc<<"],\"peak_proxy_bytes\":["<<peak_a<<','<<peak_b<<"],\"peak_wire_bytes_per_second\":["<<ap.first<<','<<bp.first<<"],\"peak_frames_per_second\":["<<ap.second<<','<<bp.second<<"],\"busy_or_reset\":0,\"proxy_streams_after\":0,\"game_fd_aliases_after\":0,\"leave_pong\":true}"<<'\n';
 }

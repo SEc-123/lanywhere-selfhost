@@ -16,3 +16,7 @@ typedef struct {
     TitleInventoryLoad (*load)(void *context, uint64_t application_id, GameCacheRecord *record);
 } TitleInventoryBackend;
 bool title_inventory_refresh_at(const char *path, const TitleInventoryBackend *backend);
+
+/* A page of installed games with a valid local communication ID. */
+int title_inventory_appointments_at(const char *path, uint32_t offset, GameCacheRecord *out,
+                                    size_t capacity, bool *has_more);

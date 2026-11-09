@@ -23,7 +23,8 @@ int main(int argc, char **argv)
                              "connection-error-list-ready", "language-unsaved", "guide-unsaved", "no-service-unsaved",
                              "network-choice", "unknown-game", "external-confirm", "lanplay-main", "lanplay-private-guard",
                              "network-config-unreadable", "network-config-invalid", "local-match", "inventory-error", "external-offline",
-                             "olunira-catalog-restored" };
+                             "olunira-catalog-restored", "game-password", "share-password",
+                              "protected-and-full-rooms", "protected-room", "unlocked-room", "password-visibility", "unified-mixed" };
     for (int zh = 0; zh < 2; zh++) {
         g_zh = zh != 0; ui_set_language(g_zh, false);
         snprintf(sample_games[0].name, sizeof(sample_games[0].name), "%s", zh ? "示例游戏：多人冒险与合作挑战" : "Sample game: multiplayer adventure");
@@ -39,6 +40,7 @@ int main(int argc, char **argv)
             g_guide_open = false; g_language_save_failed = false;
             View v = {0};
             v.sel = -1; v.next_page = LOBBY_PAGE_END; v.config_state = RelayConfigReady;
+            v.discovery = LobbyDiscoveryLegacy;
             strcpy(v.config.provider, "self"); v.capabilities = LOBBY_CAP_RESERVED_MATCH;
             v.config.public_groups = true; v.match_available = true; v.status_valid = true; v.response_ms = 86;
             snprintf(v.nickname, sizeof(v.nickname), "%s", zh ? "示例玩家" : "SamplePlayer");
@@ -98,6 +100,47 @@ int main(int argc, char **argv)
                 strcpy(v.st.error, "se perdió la conexión con el servidor");
                 v.groups[0] = (LobbyGroup){.code="ABC234",.game_id=0x0100ABF008968000ULL,.players=1,.max_players=2,.host="Sample host"};
             }
+            if (scene == 30) {
+                v.match.mode = LobbyExact; v.match.state = MatchAssigned;
+                v.pinned = (LobbyRoomId){.code="ABC234",.game_id=100};
+                v.pinned_group = (LobbyGroup){.game_id=100,.application_id=200,.metadata_flags=LOBBY_META_HOST};
+                strcpy(v.password.value, "00Ab-Cd 7");
+            }
+            if (scene == 31) {
+                v.st = (LanywhereStatus){.state=StateInRoom,.game_id=100,.code="ABC234"};
+                v.capabilities |= ROOM_PASSCODE_CAPABILITY;
+            }
+            if (scene == 32) {
+                v.capabilities |= ROOM_ACCESS_CAPABILITY;
+                v.count = 2;
+                v.groups[0] = (LobbyGroup){.code="ABC234",.game_id=100,.application_id=200,.metadata_flags=LOBBY_META_HOST,
+                    .room_access=RoomAccessHidden,.players=2,.max_players=4,.host="Sample host"};
+                v.groups[1] = (LobbyGroup){.code="ABC235",.game_id=100,.application_id=200,.metadata_flags=LOBBY_META_HOST,
+                    .room_access=RoomAccessHidden,.players=4,.max_players=4,.host="Sample host"};
+            }
+            if (scene == 33 || scene == 34) {
+                v.capabilities |= ROOM_ACCESS_CAPABILITY;
+                v.match.mode = LobbyExact;
+                v.match.state = scene == 33 ? MatchExpired : MatchWaitScan;
+                v.pinned = (LobbyRoomId){.code="ABC234",.game_id=100};
+                v.pinned_group = (LobbyGroup){.game_id=100,.application_id=200,.metadata_flags=LOBBY_META_HOST,
+                    .room_access=RoomAccessHidden};
+                v.password = (RoomPasswordView){.room=v.pinned,.locked=true,.unlocked=scene == 34};
+            }
+            if (scene == 35) v.password_edit.active = true;
+            if (scene == 36) {
+                v.discovery = LobbyDiscoveryUnified;
+                v.unified = (UnifiedPage){.count=3,.snapshot=91,.available=4,.total=13,.next=UNIFIED_LOBBY_END};
+                v.count = 3;
+                strcpy(v.config.provider, "lanplay-nl");
+                for (int i = 0; i < v.count; ++i) {
+                    v.groups[i] = (LobbyGroup){.code="ABC234",.game_id=100,.application_id=200,
+                        .metadata_flags=LOBBY_META_HOST,.players=2,.max_players=4,.host="Sample host"};
+                }
+                strcpy(v.sources[0], "self");
+                strcpy(v.sources[1], "lanywhere-public");
+                strcpy(v.sources[2], "lanplay-nl");
+            }
             char path[1024];
             snprintf(path, sizeof(path), "%s/main-%s-%s.png", argv[1], zh ? "zh" : "en", scenes[scene]);
             output_path = path;
@@ -108,7 +151,11 @@ int main(int argc, char **argv)
                     fprintf(stderr, "No-service Exit touch is intercepted by the guide\n"); failures++;
                 }
             }
-            else draw(&v);
+            else {
+                draw(&v);
+                // Real debug captures intentionally skip the password view.
+                if (scene == 30 && !gfx_save_png(path)) failures++;
+            }
             if (scene == 19) {
                 const int col_width = (LIST_W - 60) / 2;
                 for (int i = 0; i < LOBBY_PROVIDER_COUNT; ++i) {
@@ -126,6 +173,14 @@ int main(int argc, char **argv)
             if (touch_action_at(1120, 62) != HidNpadButton_StickR) {
                 fprintf(stderr, "Language touch is missing in %s\n", path); failures++;
             }
+            if ((scene == 0 || scene == 22) && touch_action_at(1180, 682) != HidNpadButton_Right) {
+                fprintf(stderr, "Bottom-right guide is not touchable in %s\n", path); failures++;
+            }
+            if (scene == 35 &&
+                (touch_action_at(100, 310) != HidNpadButton_A || touch_action_at(100, 380) != HidNpadButton_X ||
+                 touch_action_at(100, 450) != HidNpadButton_B)) {
+                fprintf(stderr, "Password visibility buttons not touchable in %s\n", path); failures++;
+            }
             for (int i = 0; i < g_zone_count; i++) {
                 TouchZone z = g_zones[i];
                 if (z.x < 0 || z.y < 0 || z.x + z.w > GFX_W || z.y + z.h > GFX_H) {
@@ -134,6 +189,10 @@ int main(int argc, char **argv)
                 if ((scene == 4 || scene == 5 || scene == 7 || scene == 8 || scene == 10) &&
                     z.x >= SIDE_X && z.y >= 128 && z.y < FOOTER_Y && z.button != HidNpadButton_R) {
                     fprintf(stderr, "Unrelated sidebar action remains in %s\n", path); failures++;
+                }
+                if (scene == 36 && (z.button == HidNpadButton_StickL || z.button == HidNpadButton_Y ||
+                                    z.button == HidNpadButton_X)) {
+                    fprintf(stderr, "Unified lobby exposed the old network selection in %s\n", path); failures++;
                 }
                 if (scene == 22 && (z.button == HidNpadButton_Y || z.button == HidNpadButton_L)) {
                     fprintf(stderr, "LAN Play exposed private/quick action in %s\n", path); failures++;

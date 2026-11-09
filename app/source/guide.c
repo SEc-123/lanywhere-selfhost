@@ -4,48 +4,58 @@
 
 typedef struct { const char *title, *steps[3], *key; } GuidePage;
 static const GuidePage pages_zh[] = {
-    { "建公开房", {
-        "确认“游戏建房”为“公开”；X 可切换。",
-        "回到游戏，进入“本地无线”。",
-        "在游戏里创建房间，等待玩家加入。"
-    }, "公开房由游戏创建，无需分享房间码。" },
-    { "加入公开房", {
-        "在大厅选房按 A；支持的网络可按 L 匹配。",
-        "回到对应游戏，进入“本地无线”。",
-        "选择“搜索房间”，按游戏提示加入。"
-    }, "选择房间后，仍需在游戏里搜索。" },
-    { "好友私房", {
-        "房主按 Y 进入“好友私房”，再按 A 创建。",
-        "好友在同一面板按 X，输入房间码。",
-        "打开同一游戏：一人建房，其他人搜索。"
-    }, "邀请码用于自有网络和公共社区；LAN Play 使用游戏内房间。" },
+    { "创建房间", {
+        "在游戏里进入“本地无线”。",
+        "创建房间后，会列在统一大厅的「自有网络」。",
+        "游戏需要密码时，在 LANywhere 按 Y 修改。"
+    }, "也可以在游戏内用 LANywhere 浮层修改密码。" },
+    { "加入房间", {
+        "在大厅按 A 选房，线路按房间来源自动切换。",
+        "打开对应游戏，进入“本地无线”。",
+        "搜索房间，按游戏提示加入。"
+    }, "受保护的房间先在大厅验证。游戏若再要求，输入相同密码。" },
+    { "游戏密码", {
+        "“在大厅分享”会让选房的玩家看到密码。",
+        "“隐藏密码”需要玩家向房主获取密码。",
+        "留空并确认可清除大厅中的密码设置。"
+    }, "只隐藏密码。房间仍显示在大厅。" },
+    { "约局", {
+        "打开应用即进入约局。大厅按十字键左可返回。",
+        "选中约局按 A 加入或退出。按 L 发起新约局。",
+        "开场前 30 分钟起按 Y 准备，临近开场按 X 找房。"
+    }, "约局开场后保留 2 小时。游戏内提醒需要 Ultrahand 通知。" },
     { "连不上", {
         "确认联网，尽量使用相同游戏版本。",
-        "使用“本地无线”，不是游戏的官方在线模式。",
+        "使用“本地无线”，别选游戏的官方在线模式。",
         "仍失败：退出游戏房间，再重新选择或创建。"
-    }, "更换插件后重启主机；房满或已关闭的公开房不会显示。" },
+    }, "来源暂不可用时，仍可查看其他来源的房间。" },
 };
 static const GuidePage pages_en[] = {
-    { "Host a public room", {
-        "Check Game room visibility is Public; X toggles it.",
-        "Return to your game and open Local Wireless.",
-        "Create a room in the game and wait for players."
-    }, "Public rooms are created in the game. No room code needed." },
-    { "Join a public room", {
-        "Select with A; press L to match on supported networks.",
+    { "Host a room", {
+        "Open Local Wireless in your game.",
+        "Create a room. It appears in All rooms under My server.",
+        "If the game uses a password, press Y in LANywhere."
+    }, "The LANywhere overlay can edit the password while in-game." },
+    { "Join a room", {
+        "Select with A. The lobby uses that room's source.",
         "Open the matching game and enter Local Wireless.",
-        "Search for rooms and join using the game's prompts."
-    }, "Selecting a room here still requires an in-game search." },
-    { "Play with friends", {
-        "Host: press Y for Friends room, then A to create.",
-        "Friends: press X in that panel and enter the room code.",
-        "Open the same game: one hosts, the others search."
-    }, "Codes: My server / Public community. LAN Play uses in-game rooms." },
+        "Search for rooms and follow the game's prompts."
+    }, "Unlock protected rooms in the lobby. Enter the same password in game if asked." },
+    { "Game passwords", {
+        "Share in lobby lets players see the password.",
+        "Keep password hidden: players ask the host for it.",
+        "Leave it blank to clear the lobby password setting."
+    }, "Hiding the password keeps the room visible in the lobby." },
+    { "Appointments", {
+        "The app opens in Appointments. D-pad Left reopens it.",
+        "A to join or leave a selected appointment. L to create.",
+        "Y for Ready from 30 min before. X to find rooms."
+    }, "Appointments stay for 2 hours after start. In-game alerts require Ultrahand." },
     { "Cannot connect?", {
         "Check internet. Use the same game version where possible.",
-        "Use Local Wireless, not the game's official online mode.",
+        "Choose Local Wireless in the game's menu.",
         "Still stuck? Leave the in-game room, then choose or host again."
-    }, "Restart after updating the plugin. Full or closed rooms stay hidden." },
+    }, "Rooms from other sources still appear when a source is unavailable." },
 };
 
 enum { PageCount = sizeof(pages_zh) / sizeof(pages_zh[0]), Margin = 56, Footer = 648 };
@@ -84,7 +94,7 @@ void guide_draw(int page, bool chinese, bool spanish)
     gfx_rect(0, Footer, GFX_W, 1, RGBA(0xFF, 0xFF, 0xFF, 0x1C));
     if (page > 0) gfx_button(Margin, Footer + 20, "ZL", chinese ? "上一页" : "Previous");
     if (page + 1 < PageCount) gfx_button(856, Footer + 20, "ZR", chinese ? "下一页" : "Next");
-    gfx_button(1090, Footer + 20, "B", chinese ? "大厅" : "Lobby");
+    gfx_button(1090, Footer + 20, "B", chinese ? "返回" : "Back");
 }
 
 u64 guide_touch_action(int x, int y, int page)

@@ -26,6 +26,14 @@ def function(source, signature):
     raise ValueError('Unclosed function: ' + signature)
 
 
+def selection_state(source):
+    start = source.index('        constexpr u64 HostRouteEpoch')
+    end = source.index('        // Called with g_lock held. A reserved match', start)
+    return (source[start:end]
+            .replace('void ClearSelectionLocked(', '[[maybe_unused]] void ClearSelectionLocked(')
+            .replace('void SelectRouteLocked(', '[[maybe_unused]] void SelectRouteLocked('))
+
+
 def main():
     source = SOURCE.read_text()
     header = HEADER.read_text()
@@ -45,7 +53,7 @@ def main():
     ]
     game_route_start = header.index('    struct GameRoute {')
     game_route = header[game_route_start:header.index('};', game_route_start) + 2]
-    pieces = {'ROUTE': route, 'GAME_ROUTE': game_route}
+    pieces = {'ROUTE': route, 'GAME_ROUTE': game_route, 'SELECTION': selection_state(source)}
     pieces.update((key, function(source, signature)) for key, signature in names)
     pieces['CONNECT'] = function(source, 'int RemainingIoMs(') + '\n' + pieces['CONNECT']
     for name in ('le16', 'le32', 'le64', 'put16', 'put32', 'put64'):

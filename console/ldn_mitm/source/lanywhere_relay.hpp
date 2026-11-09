@@ -12,6 +12,9 @@
 #pragma once
 #include <stratosphere.hpp>
 #include "../../../common/list_status.h"
+#include "../../../common/appointments.h"
+#include "../../../common/room_passcode.h"
+#include "../../../common/unified_lobby.h"
 
 namespace ams::mitm::ldn {
     struct NetworkInfo;
@@ -76,14 +79,32 @@ namespace ams::mitm::lanywhere {
         char code[8];
         u64 game_id; // LCID, never an application ID.
         u64 application_id, program_id;
-        u8 players, max_players, metadata_flags, padding[5];
+        u8 players, max_players, metadata_flags, room_access, padding[4];
         char host[40], title_en[128], title_zh[128];
     };
     static_assert(sizeof(GroupSummaryV2) == 336);
-    static_assert(offsetof(GroupSummaryV2, title_en) == 80 && offsetof(GroupSummaryV2, title_zh) == 208);
+    static_assert(offsetof(GroupSummaryV2, room_access) == 35 &&
+                  offsetof(GroupSummaryV2, title_en) == 80 && offsetof(GroupSummaryV2, title_zh) == 208);
+    struct UnifiedGroup {
+        GroupSummaryV2 group;
+        char provider[UNIFIED_LOBBY_PROVIDER_SIZE];
+        u8 reserved[7];
+    };
+    static_assert(sizeof(UnifiedGroup) == UNIFIED_LOBBY_GROUP_SIZE);
+    static_assert(offsetof(UnifiedGroup, provider) == sizeof(GroupSummaryV2));
+    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity);
+    Result SelectUnifiedRoom(const UnifiedRoomRequest &request);
+
     struct GroupPageV2 { s32 count; u32 next, capabilities, reserved; };
     static_assert(sizeof(GroupPageV2) == 16);
-    int FindGroupSummaries(u32 offset, GroupPageV2 *page, GroupSummaryV2 *groups, size_t capacity);
+    int FindGroupSummaries(u32 offset, GroupPageV2 *page, GroupSummaryV2 *groups, size_t capacity,
+                           u64 game_id = 0, bool self_only = false, bool background = false);
+    void ExchangeAppointment(const AppointmentRequest &request, AppointmentResponse *response);
+    RoomPasscodeHost DescribeRoomPasscodeHost();
+    u32 ShareRoomPasscode(const RoomPasscodeChange &change);
+    u32 SetRoomAccess(const RoomAccessChange &change);
+    u32 UnlockRoomAccess(const RoomAccessUnlock &unlock);
+    RoomPasscodeReply LookupRoomPasscode(const RoomPasscodeLookup &lookup);
 
     enum class MatchMode : u8 { Manual, Quick, Exact };
     enum class MatchState : u8 { Idle, WaitingForGame, Searching, Assigned, Joining, Joined, Expired, Cancelled, Error };
@@ -113,11 +134,15 @@ namespace ams::mitm::lanywhere {
         u16 port;
         bool public_enabled;
         char provider[33];
+        u64 selection_epoch;
+        u64 selected_game_id;
+        char selected_code[8];
     };
     bool CaptureDiscoveryRoute(DiscoveryRoute *out);
     struct GameRoute { DiscoveryRoute discovery; u64 room_epoch; u32 room_token; char room_code[8]; };
     // Active rooms retain their joined provider even if preferences change.
     bool CaptureGameRoute(GameRoute *out);
+    bool CaptureHostGameRoute(GameRoute *out);
     bool GameRouteStillCurrent(const GameRoute &route);
     void ReportGameNetworkError(bool unavailable);
     void ReportGameRouteChanged();
@@ -163,7 +188,7 @@ namespace ams::mitm::lanywhere {
 
     // Grupos abiertos: el anfitrión publica su grupo de ldn (NetworkInfo; tamaño 0 lo retira) y quien busca recibe
     // los de su juego con sitio libre, con el código de su sala.
-    bool PublicEnabled();  // config.ini "public=0" los desactiva
+    bool PublicEnabled();  // Self-hosted game rooms are always listed.
     void Publish(const void *network_info, size_t size, u64 host_program_id);
     // Pregunta con una conexión aparte (no hace falta estar en una sala). Devuelve cuántos o -1.
     // from_app: la pide la lista de la app (no el juego al buscar grupo); el servidor lo cuenta aparte en el panel.
@@ -177,7 +202,8 @@ namespace ams::mitm::lanywhere {
                        void (*found)(const char *code, const void *network_info, void *user), void *user,
                        const DiscoveryRoute *route = nullptr);
 
-    Result StartMatch(MatchMode mode, const char *code = nullptr);
+    Result StartMatch(MatchMode mode, const char *code = nullptr, const u8 *grant = nullptr,
+                      const DiscoveryRoute *authorized_route = nullptr);
     void CancelMatch();
     void GetMatchStatus(MatchStatus *out);
     bool MatchArmed();

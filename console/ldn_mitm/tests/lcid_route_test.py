@@ -21,7 +21,7 @@ def actual_struct(header, name):
 
 def main():
     source, header = SRC.read_text(), HDR.read_text()
-    signatures = ('bool CaptureDiscoveryRoute(', 'bool CaptureGameRoute(',
+    signatures = ('bool CaptureDiscoveryRoute(', 'bool CaptureGameRoute(', 'bool CaptureHostGameRoute(',
                   'bool GameRouteStillCurrent(', 'bool DiscoveryRouteStillSelected(const DiscoveryRoute &route) {', 'Result CreateRoom(', 'void LeaveGameRoom(')
     bodies = [extract.function(source, signature) for signature in signatures]
     enter = extract.function(source, 'Result Enter(')
@@ -34,6 +34,7 @@ def main():
     harness = r'''
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -59,10 +60,20 @@ static bool LoadServer(sockaddr_in *server=nullptr,char *provider=nullptr){
  if(server){*server={};server->sin_addr.s_addr=configured_ip;server->sin_port=configured_port;}return true;
 }
 static Result ResultRelayFailed(){return 1;}
-static bool MatchArmed(){return false;}static void CancelMatch(){}
+static bool InRoom(){return g_state==RelayState::InRoom;}
+namespace os {
+struct Tick {
+    u64 ms;
+    Tick ToTimeSpan() const { return *this; }
+    u64 GetMilliSeconds() const { return ms; }
+};
+Tick GetSystemTick() { return {1000}; }
+}
 static void put64(u8 *p,u64 v){for(int i=0;i<8;i++)p[i]=u8(v>>(8*i));}
 static void Nickname(char *out,size_t size){std::snprintf(out,size,"test");if(change_at_nickname)configured="lanplay-cn-jax";}
-''' + route + '\n' + game_route + '\n' + '\n'.join(bodies[:4]) + r'''
+''' + route + '\n' + game_route + '\n' + extract.selection_state(source) + r'''
+static void CancelMatch(){ClearSelectionLocked();}
+''' + '\n'.join(bodies[:5]) + r'''
 static int attempted=0;static u64 sent_id=0;static std::string sent_provider;
 static Result Enter(u8,const u8 *body,size_t,const sockaddr_in *,u8 *,const u8 *,const DiscoveryRoute *route,GameRoute *joined){
  // Mirrors the exact pre-LeaveCurrentRoom guard asserted against the real Enter body above.
@@ -71,8 +82,8 @@ static Result Enter(u8,const u8 *body,size_t,const sockaddr_in *,u8 *,const u8 *
  sent_provider=route?route->provider:configured;
  if(joined){*joined={};joined->discovery=*route;joined->room_epoch=g_stream_epoch.load();joined->room_token=91;std::memcpy(joined->room_code,"ABC234",6);}return 0;
 }
-''' + bodies[4] + '\n' + bodies[5] + r'''
-static void reset(){g_state=RelayState::Idle;g_recovering=false;configured="self";configured_public=true;config_valid=true;
+''' + bodies[5] + '\n' + bodies[6] + r'''
+static void reset(){ClearSelectionLocked();g_state=RelayState::Idle;g_recovering=false;configured="self";configured_public=true;config_valid=true;
  configured_ip=htonl(0x7f000001);configured_port=htons(11460);g_public=true;change_at_nickname=false;attempted=0;leaves=0;g_token=0;std::strcpy(g_code,"ABC234");g_stream_epoch=1;g_stream_ready=false;}
 int main(){unsigned checks=0;reset();GameRoute route{};
  assert(!CaptureGameRoute(nullptr));assert(CaptureGameRoute(&route)&&route.room_epoch==0&&std::string(route.discovery.provider)=="self");checks++;
@@ -86,8 +97,13 @@ int main(){unsigned checks=0;reset();GameRoute route{};
  assert(!GameRouteStillCurrent(route));assert(CreateRoom(0x111,&route.discovery,nullptr)!=0&&attempted==0);checks++;
  reset();assert(CaptureGameRoute(&route));change_at_nickname=true;
  assert(CreateRoom(0x111,&route.discovery,nullptr)!=0&&attempted==0);checks++;
- reset();configured="lanplay-cn-jax";assert(CaptureGameRoute(&route));assert(CreateRoom(UINT64_MAX,&route.discovery,nullptr)==0);
- assert(attempted==1&&sent_id==UINT64_MAX&&sent_provider=="lanplay-cn-jax");checks++;
+ reset();configured="lanplay-cn-jax";assert(CaptureHostGameRoute(&route));
+ assert(route.discovery.public_enabled&&std::string(route.discovery.provider)=="self");
+ assert(CreateRoom(0x111,&route.discovery,nullptr)==0&&attempted==1&&sent_id==0x111&&sent_provider=="self");checks++;
+ reset();configured="lanplay-cn-jax";assert(CaptureGameRoute(&route));
+ route.discovery.selected_game_id=42;
+ SelectRouteLocked(route.discovery,"ABC234");
+ assert(CreateRoom(0x111,nullptr,nullptr)==0&&attempted==1&&sent_provider=="self"&&!g_selection.selection_epoch);checks++;
  reset();g_state=RelayState::InRoom;g_stream_ready=true;g_server.sin_addr.s_addr=htonl(0x7f000001);g_server.sin_port=htons(11460);
  std::strcpy(g_room_provider,"lanplay-cn-jax");g_stream_epoch=9;g_token=77;configured="self";
  assert(CaptureGameRoute(&route)&&route.room_epoch==9&&std::string(route.discovery.provider)=="lanplay-cn-jax");

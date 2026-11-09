@@ -26,7 +26,23 @@
     AMS_SF_METHOD_INFO(C, H, 11, Result, ListGroupsPage, (u32 offset, ams::sf::Out<ams::mitm::lanywhere::GroupPage> page,  \
                                                         const ams::sf::OutBuffer &out), (offset, page, out)) \
     AMS_SF_METHOD_INFO(C, H, 12, Result, ListGroupsV2, (u32 offset, ams::sf::Out<ams::mitm::lanywhere::GroupPageV2> page, \
-                                                      const ams::sf::OutBuffer &out), (offset, page, out))
+                                                      const ams::sf::OutBuffer &out), (offset, page, out)) \
+    AMS_SF_METHOD_INFO(C, H, 13, Result, AppointmentExchange, (const ams::sf::InBuffer &request, \
+                                                      const ams::sf::OutBuffer &out), (request, out)) \
+    AMS_SF_METHOD_INFO(C, H, 14, Result, ListAppointmentRooms, (AppointmentRoomsRequest request, \
+        ams::sf::Out<ams::mitm::lanywhere::GroupPageV2> page, const ams::sf::OutBuffer &out), (request, page, out)) \
+    AMS_SF_METHOD_INFO(C, H, 15, Result, SetAppointmentWatch, (AppointmentWatchRequest request, \
+        ams::sf::Out<u32> status), (request, status)) \
+    AMS_SF_METHOD_INFO(C, H, 16, Result, GetAppointmentWatch, (ams::sf::Out<u64> id), (id)) \
+    AMS_SF_METHOD_INFO(C, H, 17, Result, SetRoomPasscode, (RoomPasscodeChange change, ams::sf::Out<u32> status), (change, status)) \
+    AMS_SF_METHOD_INFO(C, H, 18, Result, GetRoomPasscode, (RoomPasscodeLookup lookup, ams::sf::Out<RoomPasscodeReply> reply), (lookup, reply)) \
+    AMS_SF_METHOD_INFO(C, H, 19, Result, GetRoomPasscodeHost, (ams::sf::Out<RoomPasscodeHost> host), (host)) \
+    AMS_SF_METHOD_INFO(C, H, 20, Result, SetGameRoomAccess, (RoomAccessChange change, ams::sf::Out<u32> status), (change, status)) \
+    AMS_SF_METHOD_INFO(C, H, 21, Result, UnlockGameRoom, (RoomAccessUnlock unlock, ams::sf::Out<u32> status), (unlock, status)) \
+    AMS_SF_METHOD_INFO(C, H, 22, Result, ReadAppointmentSubscriptions, (const ams::sf::OutBuffer &out), (out)) \
+    AMS_SF_METHOD_INFO(C, H, 23, Result, UpdateAppointmentSubscription, (AppointmentWatchRequest request, ams::sf::Out<u32> status), (request, status)) \
+    AMS_SF_METHOD_INFO(C, H, 24, Result, ListUnifiedRooms, (UnifiedRoomsRequest request, ams::sf::Out<UnifiedPage> page, const ams::sf::OutBuffer &out), (request, page, out)) \
+    AMS_SF_METHOD_INFO(C, H, 25, Result, SelectUnifiedLobbyRoom, (UnifiedRoomRequest request), (request))
 
 AMS_SF_DEFINE_INTERFACE(ams::mitm::lanywhere, ILanywhereService, AMS_ILANYWHERE_SERVICE, 0x594E414C)
 
@@ -47,6 +63,19 @@ namespace ams::mitm::lanywhere {
             Result GetProtocolCapabilities(sf::Out<u32> out);
             Result ListGroupsV2(u32 offset, sf::Out<GroupPageV2> page, const sf::OutBuffer &out);
             Result ListGroupsPage(u32 offset, sf::Out<GroupPage> page, const sf::OutBuffer &out);
+            Result AppointmentExchange(const sf::InBuffer &request, const sf::OutBuffer &out);
+            Result ListAppointmentRooms(AppointmentRoomsRequest request, sf::Out<GroupPageV2> page, const sf::OutBuffer &out);
+            Result SetAppointmentWatch(AppointmentWatchRequest request, sf::Out<u32> status);
+            Result GetAppointmentWatch(sf::Out<u64> id);
+            Result SetRoomPasscode(RoomPasscodeChange change, sf::Out<u32> status);
+            Result GetRoomPasscode(RoomPasscodeLookup lookup, sf::Out<RoomPasscodeReply> reply);
+            Result GetRoomPasscodeHost(sf::Out<RoomPasscodeHost> host);
+            Result SetGameRoomAccess(RoomAccessChange change, sf::Out<u32> status);
+            Result UnlockGameRoom(RoomAccessUnlock unlock, sf::Out<u32> status);
+            Result ReadAppointmentSubscriptions(const sf::OutBuffer &out);
+            Result UpdateAppointmentSubscription(AppointmentWatchRequest request, sf::Out<u32> status);
+            Result ListUnifiedRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out);
+            Result SelectUnifiedLobbyRoom(UnifiedRoomRequest request);
     };
     static_assert(IsILanywhereService<LanywhereService>);
 

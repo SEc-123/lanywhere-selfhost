@@ -28,7 +28,7 @@ test('actual TCP relay: flow-controlled byte stream, room isolation and detach r
     const port = Number(/control TCP en (\d+)/.exec(logs)[1]);
     async function enter(name, code, features = 3) {
         const p = new Peer(name, '127.0.0.1', port); peers.push(p); await p.connect();
-        p.send(0x0b); assert.equal((await p.frame(0x89)).readUInt32LE(), 255);
+        p.send(0x0b); assert.equal((await p.frame(0x89)).readUInt32LE(), 255 | 512 | 1024 | 2048);
         const nick = Buffer.alloc(32); nick.write(name);
         p.send(code ? 2 : 1, Buffer.concat(code ? [code, nick, Buffer.alloc(8), Buffer.from([features])] :
             [Buffer.alloc(8), nick, Buffer.from([features])]));

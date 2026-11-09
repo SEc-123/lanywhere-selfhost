@@ -11,7 +11,18 @@ typedef enum {SetLanguage_ENUS=1,SetLanguage_ZHCN=6,SetLanguage_ZHTW=11,SetLangu
 #define MAKERESULT(m,d) ((m)*512+(d))
 #define Module_Libnx 345
 #define LibnxError_BadInput 2
-#define HidNpadButton_A 1
+#define HidNpadButton_A        (UINT64_C(1) << 0)
+#define HidNpadButton_B        (UINT64_C(1) << 2)
+#define HidNpadButton_Y        (UINT64_C(1) << 3)
+#define HidNpadButton_L        (UINT64_C(1) << 4)
+#define HidNpadButton_R        (UINT64_C(1) << 5)
+#define HidNpadButton_Plus     (UINT64_C(1) << 6)
+#define HidNpadButton_Minus    (UINT64_C(1) << 7)
+#define HidNpadButton_AnyLeft  (UINT64_C(1) << 8)
+#define HidNpadButton_AnyRight (UINT64_C(1) << 9)
+#define HidNpadButton_X        (UINT64_C(1) << 10)
+typedef struct { u32 x, y; } HidTouchState;
+typedef struct { int x, y; } HidAnalogStickState;
 typedef struct {int out_num_objects;Service*out_objects;} MockParams;
 #ifdef __cplusplus
 extern "C" {
@@ -27,4 +38,5 @@ u64 armGetSystemTick(void);u64 armGetSystemTickFreq(void);
 #define serviceDispatch(s,c,...) mockDispatch((s),(c),NULL,0,NULL,0,(MockParams){__VA_ARGS__})
 #define serviceDispatchOut(s,c,o,...) mockDispatch((s),(c),NULL,0,&(o),sizeof(o),(MockParams){__VA_ARGS__})
 #define serviceDispatchIn(s,c,i,...) mockDispatch((s),(c),&(i),sizeof(i),NULL,0,(MockParams){__VA_ARGS__})
+#define serviceDispatchInOut(s,c,i,o,...) mockDispatch((s),(c),&(i),sizeof(i),&(o),sizeof(o),(MockParams){__VA_ARGS__})
 #define tipcDispatchInOut(s,c,i,o) mockDispatch((s),(c),&(i),sizeof(i),&(o),sizeof(o),(MockParams){0})

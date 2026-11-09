@@ -58,7 +58,8 @@ read -r version upstream atmosphere tesla <<< "$provenance"
 
 for component in console/Atmosphere-libs console/libtesla; do
     gitlink=''
-    if [[ -e $root/.git ]]; then
+    # A container may see a linked worktree without its external Git directory.
+    if [[ -e $root/.git ]] && git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         gitlink=$(git -C "$root" ls-files --stage -- "$component" | awk '$1 == "160000" {print $2}')
     fi
     if [[ -n $gitlink ]]; then

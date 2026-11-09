@@ -6,12 +6,13 @@
 #include "lobby_model.h"
 #include "relay_config.h"
 #define TR(es,en) (en)
+#define ui_text(s) (s)
 #define ListConnecting (-1)
 #define ListUnavailable (-2)
 #define HidNpadButton_AnyDown (1ULL << 15)
 #define HidNpadButton_AnyUp (1ULL << 14)
 #define HidNpadButton_AnyLeft (1ULL << 16)
-#define HidNpadButton_AnyRight (1ULL << 17)
+#define HidNpadButton_AnyRight (HidNpadButton_Right | (1ULL << 17))
 #define TOUCH_CARD (1ULL << 62)
 #define TOUCH_NETWORK_CHOICE (1ULL << 61)
 /* SOURCE_PAGE_LIMIT */
@@ -21,8 +22,23 @@
 /* SOURCE_CLEAN_NICKNAME */
 
 typedef struct { int create, join, leave, cancel, quick, select, launch, public_write, nickname_write, provider_write;
-    int ask_code, page, draw, busy, write_error, sleep, language; } Calls;
+    int ask_code, page, draw, busy, write_error, sleep, language, share_password, unlock_password, appointment_open, select_route; } Calls;
 static Calls calls;
+static int g_lanywhere;
+static const char *room_password_edit(int *service, const char room[8], bool supports_hidden, RoomPasswordEdit *edit)
+{
+    assert(service == &g_lanywhere && strcmp(room, "ABC234") == 0);
+    edit->active = supports_hidden;
+    calls.share_password++;
+    return supports_hidden ? NULL : "Game password shared.";
+}
+static const char *room_password_unlock(int *service, RoomPasswordView *view)
+{
+    assert(service == &g_lanywhere && view->locked && !view->unlocked && !view->pending);
+    view->unlocked = true;
+    calls.unlock_password++;
+    return "Room unlocked.";
+}
 static bool g_guide_open, g_zh, g_es, g_language_save_failed;
 static atomic_bool g_inventory_running;
 static int g_guide_page;
@@ -33,14 +49,46 @@ static u64 now_ms(void) { return 10000; }
 static void svcSleepThread(u64 nanoseconds) { (void)nanoseconds; calls.sleep++; }
 static void draw(const View *v) { (void)v; calls.draw++; }
 static void draw_busy(const char *s) { (void)s; calls.busy++; }
-static int guide_page_count(void) { return 4; }
+static int guide_page_count(void) { return 5; }
+enum { GuideAppointmentsPage = 3 };
+static bool appointment_screen, appointment_list;
+static bool appointments_active(void) { return appointment_screen; }
+static bool appointments_list_active(void) { return appointment_screen && appointment_list; }
+static void appointments_open(bool worker, bool resume)
+{
+    (void)worker;
+    assert(!resume);
+    appointment_screen = appointment_list = true;
+    calls.appointment_open++;
+}
+/* SOURCE_GUIDE_INPUT */
+static void start_screen(View v, bool thread_ok)
+{
+/* SOURCE_START_SCREEN */
+}
 static void switch_language(void) { g_zh = !g_zh; calls.language++; }
-static void cancel_match(View *v) { calls.cancel++; v->match.mode = LobbyManual; }
+static void cancel_match(View *v) { calls.cancel++; v->match.mode = LobbyManual; v->pinned = (LobbyRoomId){0}; }
 static void start_quick(View *v) { calls.quick++; v->match.mode = LobbyQuick; }
-static void select_room(View *v) { calls.select++; assert(v->selection.code[0]); }
 static bool open_selected_game(View *v) { (void)v; calls.launch++; return launch_ok; }
 static const void *local_game_info(const LobbyGroup *g) { return launch_ok ? g : NULL; }
-static void restart_group_list(u32 offset, bool available) { (void)offset; (void)available; calls.page++; }
+static void poll_lanywhere(View *v) { (void)v; }
+static Result lanywhere_select(const char *code) { assert(code[0]); calls.select++; return 0; }
+static LobbyRoomId selected_route;
+static Result route_result;
+static Result lanywhere_select_unified(LobbyRoomId id) { selected_route=id; calls.select_route++; return route_result; }
+static bool unified_ipc_missing(Result rc) { return rc == 1; }
+/* SOURCE_SELECT_ROOM */
+static u64 filtered_game;
+static u32 requested_snapshot;
+static void restart_group_query(u32 offset, u32 snapshot, bool available, const char *provider, bool set_game, u64 game_id)
+{
+    (void)available;
+    assert(!offset && !snapshot && !provider && set_game && game_id);
+    filtered_game = game_id;
+    calls.page++;
+}
+/* SOURCE_FIND_APPOINTMENT_ROOMS */
+static void restart_group_list(u32 offset, u32 snapshot, bool available) { (void)offset; (void)available; requested_snapshot=snapshot; calls.page++; }
 static void restart_group_list_on_network(u32 offset, bool available, const char *provider) { (void)offset; (void)available; (void)provider; calls.page++; }
 static void lanywhere_leave(void) { calls.leave++; }
 static Result lanywhere_create(u64 game, const char *nickname) { assert(game == 0); (void)nickname; calls.create++; return 0; }
@@ -101,23 +149,68 @@ static u64 touch_button(void) {return touch_action_at(1130,680);}
 /* SOURCE_NO_SERVICE */
 
 static View lobby(void) {
-    memset(&calls,0,sizeof(calls)); g_guide_open=false;g_guide_page=0;g_zh=false;g_language_save_failed=false;atomic_store(&g_inventory_running,false);accept_code=true;save_ok=true;launch_ok=true;
-    View v={0};v.sel=-1;v.config_state=RelayConfigReady;v.config.public_groups=true;v.match_available=true;v.status_valid=true;v.capabilities=LOBBY_CAP_RESERVED_MATCH;v.next_page=LOBBY_PAGE_END;
+    memset(&calls,0,sizeof(calls)); g_guide_open=false;g_guide_page=0;appointment_screen=appointment_list=false;g_zh=false;g_language_save_failed=false;atomic_store(&g_inventory_running,false);accept_code=true;save_ok=true;launch_ok=true;
+    View v={0};v.sel=-1;v.discovery=LobbyDiscoveryLegacy;route_result=0;v.config_state=RelayConfigReady;v.config.public_groups=true;v.match_available=true;v.status_valid=true;v.capabilities=LOBBY_CAP_RESERVED_MATCH;v.next_page=LOBBY_PAGE_END;
     strcpy(v.config.provider,"self");
     return v;
 }
-static int effects(void) {return calls.create+calls.join+calls.leave+calls.cancel+calls.quick+calls.select+calls.launch+calls.public_write+calls.nickname_write+calls.provider_write;}
+static int effects(void) {return calls.create+calls.join+calls.leave+calls.cancel+calls.quick+calls.select+calls.select_route+calls.launch+calls.public_write+calls.nickname_write+calls.provider_write;}
 static void checked(void) {checks++;}
 static void choose(View *v) {v->count=1;strcpy(v->groups[0].code,"ABC234");v->groups[0].game_id=1;v->selection=lobby_room_id(&v->groups[0]);v->sel=0;}
 
 int main(void) {
     View v=lobby();step(&v,HidNpadButton_A);assert(effects()==0);checked();
+    v=lobby();start_screen(v,true);
+    assert(appointment_screen&&appointment_list&&!g_guide_open&&calls.appointment_open==1);checked();
+    assert(!guide_input(&v,HidNpadButton_R));checked(); /* R reaches the appointment list as refresh. */
+    assert(guide_input(&v,HidNpadButton_Right)&&g_guide_open&&g_guide_page==GuideAppointmentsPage);checked();
+    assert(guide_input(&v,HidNpadButton_B)&&!g_guide_open&&appointment_screen&&calls.appointment_open==1);checked();
+    appointment_list=false;assert(!guide_input(&v,HidNpadButton_Right)&&!g_guide_open);checked();
+    appointment_screen=false;step(&v,0);assert(!appointment_screen&&calls.appointment_open==1);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");start_screen(v,true);
+    assert(appointment_screen&&!g_guide_open&&calls.appointment_open==1);checked();
+    assert(!strcmp(v.config.provider,"lanywhere-public"));checked();
+    appointment_screen=false;
+    assert(step(&v,HidNpadButton_Right)==2&&g_guide_open&&g_guide_page==0);checked();
+    assert(step(&v,HidNpadButton_B)==2&&!g_guide_open&&!appointment_screen);checked();
+    open_appointment_rooms(&v,17,true);
+    assert(!calls.page&&!v.appointment_game_id&&!strcmp(v.config.provider,"lanywhere-public"));checked();
+    assert(!strcmp(v.message,"Press LS and choose My server to find these rooms."));checked();
+    v=lobby();open_appointment_rooms(&v,17,true);
+    assert(calls.page==1&&filtered_game==17&&v.appointment_game_id==17&&v.count==ListConnecting);checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnknown;strcpy(v.config.provider,"lanplay-nl");
+    open_appointment_rooms(&v,18,true);
+    assert(calls.page==1&&filtered_game==18&&v.appointment_game_id==18&&!strcmp(v.config.provider,"lanplay-nl"));checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnified;strcpy(v.config.provider,"lanplay-nl");choose(&v);
+    v.count=2;v.groups[1]=v.groups[0];strcpy(v.sources[0],"self");strcpy(v.sources[1],"lanplay-nl");
+    v.selection=lobby_room_id_on(&v.groups[1],v.sources[1]);
+    step(&v,HidNpadButton_StickL);assert(!v.provider_panel&&calls.provider_write==0);checked();
+    step(&v,HidNpadButton_A);assert(calls.select_route==1&&calls.select==0&&v.external_confirm);
+    assert(!strcmp(selected_route.provider,"lanplay-nl")&&selected_route.game_id==1);checked();
+    step(&v,HidNpadButton_B);assert(calls.cancel==1&&!v.external_confirm&&!v.pinned.game_id);checked();
+    v.selection=lobby_room_id_on(&v.groups[0],v.sources[0]);
+    step(&v,HidNpadButton_A);assert(calls.select_route==2&&!v.external_confirm&&!strcmp(v.pinned.provider,"self"));checked();
+    v.match.mode=LobbyExact;v.match.state=MatchAssigned;v.capabilities|=ROOM_PASSCODE_CAPABILITY;
+    assert(lobby_room_equal(room_password_target(&v),v.pinned));checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnified;v.next_page=6;v.unified.snapshot=73;
+    step(&v,HidNpadButton_ZR);assert(v.page_index==1&&requested_snapshot==73);checked();
+    v=lobby();v.config_state=RelayConfigFileError;start_screen(v,true);
+    assert(!appointment_screen&&!g_guide_open);checked();
     v=lobby();choose(&v);step(&v,HidNpadButton_A);assert(calls.select==1&&calls.create==0);checked();
     v=lobby();strcpy(v.selection.code,"OLD234");step(&v,HidNpadButton_A);assert(effects()==0&&!v.selection.code[0]);checked();
-    v=lobby();choose(&v);step(&v,HidNpadButton_Y);assert(v.private_panel&&!v.selection.code[0]&&v.sel==-1&&effects()==0);checked();
-    v=lobby();v.private_panel=true;step(&v,HidNpadButton_A);assert(calls.create==1&&calls.join==0&&calls.public_write==0);checked();
-    v=lobby();v.private_panel=true;step(&v,HidNpadButton_X);assert(calls.ask_code==1&&calls.join==1&&calls.public_write==0);checked();
-    v=lobby();v.private_panel=true;accept_code=false;step(&v,HidNpadButton_X);assert(calls.ask_code==1&&effects()==0);checked();
+    v=lobby();choose(&v);step(&v,HidNpadButton_Y);
+    assert(!v.private_panel&&v.selection.code[0]&&effects()==0);checked();
+    step(&v,HidNpadButton_X);assert(calls.public_write==0);checked();
+    v.private_panel=true;step(&v,HidNpadButton_A);step(&v,HidNpadButton_X);
+    assert(calls.create==0&&calls.join==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");choose(&v);step(&v,HidNpadButton_Y);
+    assert(v.private_panel&&!v.selection.code[0]&&v.sel==-1&&effects()==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");v.private_panel=true;
+    step(&v,HidNpadButton_A);assert(calls.create==1&&calls.join==0&&calls.public_write==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");v.private_panel=true;
+    step(&v,HidNpadButton_X);assert(calls.ask_code==1&&calls.join==1&&calls.public_write==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");v.private_panel=true;accept_code=false;
+    step(&v,HidNpadButton_X);assert(calls.ask_code==1&&effects()==0);checked();
     v=lobby();v.private_panel=true;v.private_room=true;v.st.state=StateInRoom;step(&v,HidNpadButton_B);assert(calls.leave==1&&calls.cancel==0);checked();
     v=lobby();v.private_panel=true;step(&v,HidNpadButton_B);assert(!v.private_panel&&effects()==0);checked();
     v=lobby();v.match.mode=LobbyExact;v.match.state=MatchAssigned;assert(step(&v,HidNpadButton_R)==2);assert(g_guide_open&&v.match.mode==LobbyExact&&effects()==0);checked();
@@ -132,9 +225,40 @@ int main(void) {
         v=lobby();v.private_panel=true;v.private_room=room;v.st.state=room?StateInRoom:StateIdle;v.page_index=1;v.next_page=12;
         step(&v,right?HidNpadButton_ZR:HidNpadButton_ZL);assert(v.page_index==1&&calls.page==0&&effects()==0);checked();}
     v=lobby();v.page_index=1;step(&v,HidNpadButton_ZL);assert(v.page_index==0&&calls.page==1);checked();
-    v=lobby();step(&v,HidNpadButton_X);assert(calls.public_write==1&&!v.config.public_groups&&calls.ask_code==0);checked();
-    v=lobby();save_ok=false;step(&v,HidNpadButton_X);assert(calls.public_write==1&&calls.write_error==1&&v.config.public_groups);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");step(&v,HidNpadButton_X);assert(calls.public_write==1&&!v.config.public_groups&&calls.ask_code==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");save_ok=false;step(&v,HidNpadButton_X);assert(calls.public_write==1&&calls.write_error==1&&v.config.public_groups);checked();
     v=lobby();v.st.state=StateInRoom;step(&v,HidNpadButton_X);assert(effects()==0);checked();
+    v=lobby();v.st.state=StateInRoom;v.st.game_id=1;strcpy(v.st.code,"ABC234");
+    step(&v,HidNpadButton_Y);assert(calls.share_password==0);checked();
+    v.capabilities |= ROOM_PASSCODE_CAPABILITY;
+    v.st.my_index=1;step(&v,HidNpadButton_Y);assert(calls.share_password==0);checked();
+    v.st.my_index=0;step(&v,HidNpadButton_Y);
+    assert(calls.share_password==1&&!v.private_panel&&!strcmp(v.message,"Game password shared."));checked();
+    strcpy(v.config.provider,"lanplay-nl");step(&v,HidNpadButton_Y);assert(calls.share_password==1);checked();
+    v=lobby();v.match.mode=LobbyExact;v.match.state=MatchWaitScan;
+    v.pinned=(LobbyRoomId){.code="ABC234",.game_id=1};
+    assert(!room_password_target(&v).game_id);checked();
+    v.capabilities |= ROOM_PASSCODE_CAPABILITY;
+    assert(room_password_target(&v).game_id==1);checked();
+    strcpy(v.config.provider,"lanywhere-public");assert(!room_password_target(&v).game_id);checked();
+    strcpy(v.config.provider,"self");v.match.mode=LobbyQuick;
+    assert(!room_password_target(&v).game_id);checked();
+    v.match.state=MatchAssigned;v.match.game_id=2;strcpy(v.match.room,"XYZ987");
+    LobbyRoomId assigned=room_password_target(&v);
+    assert(assigned.game_id==2&&!strcmp(assigned.code,"XYZ987"));checked();
+    v.match.state=MatchExpired;assert(!room_password_target(&v).game_id);checked();
+    v.match.mode=LobbyExact;v.capabilities|=ROOM_ACCESS_CAPABILITY;
+    assert(room_password_target(&v).game_id==1);checked();
+    v.password=(RoomPasswordView){.room=v.pinned,.locked=true,.pending=true};
+    step(&v,HidNpadButton_A);assert(calls.unlock_password==0&&calls.launch==0);checked();
+    v.password.pending=false;step(&v,HidNpadButton_A);
+    assert(calls.unlock_password==1&&calls.launch==0&&v.password.unlocked);checked();
+    v.match.state=MatchWaitScan;step(&v,HidNpadButton_A);assert(calls.launch==1);checked();
+    v=lobby();choose(&v);v.groups[0].players=v.groups[0].max_players=4;
+    step(&v,HidNpadButton_A);assert(v.sel==-1&&calls.select==0&&!strcmp(v.message,"This room is full."));checked();
+    v.count=2;v.groups[1]=(LobbyGroup){.code="NEW234",.game_id=2,.max_players=4,.players=1};
+    step(&v,HidNpadButton_AnyDown);assert(v.sel==1&&!strcmp(v.selection.code,"NEW234"));checked();
+    step(&v,HidNpadButton_AnyUp);assert(v.sel==-1);checked();
     for(unsigned i=0;i<sizeof(connect_keys)/sizeof(*connect_keys);i++){
         v=lobby();v.st.state=StateInRoom;v.st.game_id=1;step(&v,connect_keys[i]);assert(!v.private_panel&&effects()==0);checked();}
     v=lobby();v.match.mode=LobbyExact;step(&v,HidNpadButton_Y|HidNpadButton_X);assert(!v.private_panel&&effects()==0);checked();
@@ -199,9 +323,9 @@ int main(void) {
         assert(!v.provider_panel&&!v.private_panel&&calls.provider_write==0&&calls.public_write==0&&calls.nickname_write==0&&calls.quick==0&&calls.select==0);checked();
     }
     v=lobby();v.private_panel=true;step(&v,HidNpadButton_L);assert(effects()==0);checked();
-    v=lobby();step(&v,HidNpadButton_Y|HidNpadButton_A);assert(v.private_panel&&effects()==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanywhere-public");step(&v,HidNpadButton_Y|HidNpadButton_A);assert(v.private_panel&&effects()==0);checked();
     v=lobby();g_guide_open=true;step(&v,HidNpadButton_ZL);assert(g_guide_page==0);checked();
-    v=lobby();g_guide_open=true;g_guide_page=3;step(&v,HidNpadButton_ZR);assert(g_guide_page==3);checked();
+    v=lobby();g_guide_open=true;g_guide_page=4;step(&v,HidNpadButton_ZR);assert(g_guide_page==4);checked();
     v=lobby();v.private_panel=true;g_guide_open=true;step(&v,HidNpadButton_ZR);assert(g_guide_page==1&&v.private_panel&&effects()==0);checked();
     v=lobby();g_guide_open=true;applet_ticks=2;PadState pad={0};no_service(&pad,false);
     assert(!g_guide_open&&calls.sleep==0&&touch_action_at(1130,680)==HidNpadButton_Plus);checked();

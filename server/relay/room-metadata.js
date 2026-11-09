@@ -36,10 +36,11 @@ function create({ now = Date.now } = {}) {
         entries.set(room, { ...value, raw: Buffer.from(body), owner: member });
         return { ok: true };
     }
-    function summary(room) {
+    function summary(room, access) {
         const b = Buffer.alloc(RECORD_BYTES), host = room.members[0];
         b.write(room.code,0,6,'ascii'); b.writeBigUInt64LE(room.gameId,8);
-        b[32] = room.published.info[0x67]; b[33] = room.published.info[0x66];
+        b[32] = access?.players ?? room.published.info[0x67]; b[33] = room.published.info[0x66];
+        if (access) b[35] = access.mode;
         b.write(host?.nick || '',40,39,'utf8');
         const value = entries.get(room);
         if (value && value.owner === host) {
@@ -49,10 +50,10 @@ function create({ now = Date.now } = {}) {
         }
         return b;
     }
-    function page(rooms, next) {
+    function page(rooms, next, describeAccess) {
         if (!Array.isArray(rooms) || rooms.length > 6) throw Error('Invalid metadata page');
         const header = Buffer.alloc(5); header.writeUInt32LE(next); header[4] = rooms.length;
-        return Buffer.concat([header,...rooms.map(summary)]);
+        return Buffer.concat([header, ...rooms.map(room => summary(room, describeAccess?.(room)))]);
     }
     return { set, summary, page };
 }

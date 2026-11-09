@@ -44,10 +44,11 @@ int main(int argc, char **argv)
         if (!gfx_text_has_glyphs(inventory)) { fprintf(stderr, "Missing glyph in guide/ui_text inventory\n"); failures++; }
         free(inventory);
     }
-    assert(guide_page_count() == 4);
-    for (int p = 0; p < guide_page_count(); p++) {
+    const int pages = guide_page_count();
+    assert(pages == 5);
+    for (int p = 0; p < pages; p++) {
         assert(guide_touch_action(60, 680, p) == (p ? HidNpadButton_ZL : 0));
-        assert(guide_touch_action(900, 680, p) == (p < 3 ? HidNpadButton_ZR : 0));
+        assert(guide_touch_action(900, 680, p) == (p + 1 < pages ? HidNpadButton_ZR : 0));
         assert(guide_touch_action(1120, 680, p) == HidNpadButton_B);
         assert(guide_touch_action(1120, 600, p) == 0);
         assert(guide_touch_action(1120, 62, p) == HidNpadButton_StickR);
@@ -66,6 +67,7 @@ int main(int argc, char **argv)
     // Spanish intentionally falls back to the English guide.
     gfx_begin(); guide_draw(0, false, true); gfx_end();
     gfx_exit();
-    printf("Host guide: %u text checks, %u failures, 8 rendered pages; not a Switch hardware capture.\n", measured, failures);
+    printf("Host guide: %u text checks, %u failures, %d rendered pages; not a Switch hardware capture.\n",
+           measured, failures, 2 * pages);
     return failures ? 1 : 0;
 }

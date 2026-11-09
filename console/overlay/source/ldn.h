@@ -1,6 +1,7 @@
 /* Modified by LANywhere Self-host, 2026-11-07 to 2026-11-08. */
 #pragma once
 #include <switch.h>
+#include "../../../common/room_passcode.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,8 @@ _Static_assert(sizeof(LanywhereOverlayStatus) == 96 && sizeof(LanywhereOverlayMa
 Result lanywhereOverlayGetProtocol(Service *s, u32 *version);
 Result lanywhereOverlayGetStatus(Service *s, LanywhereOverlayStatus *out);
 Result lanywhereOverlayGetMatch(Service *s, LanywhereOverlayMatch *out);
+Result lanywhereOverlayGetPasscodeHost(Service *s, RoomPasscodeHost *out);
+Result lanywhereOverlaySetRoomAccess(Service *s, const RoomAccessChange *change, u32 *status);
 
 #ifdef __cplusplus
 }

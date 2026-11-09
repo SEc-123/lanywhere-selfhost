@@ -93,6 +93,8 @@ int main(void)
     assert(access(tmp,F_OK)!=0 && lookup(path,0x101,0x111,&out,&generation)==GameCacheFound && generation==2);
     FILE *f=fopen(path,"r+b");assert(f);assert(fseek(f,100,SEEK_SET)==0);int b=fgetc(f);assert(b!=EOF);assert(fseek(f,100,SEEK_SET)==0);fputc(b^1,f);fclose(f);
     assert(lookup(path,0x101,0x111,&out,NULL)==GameCacheInvalid);
+    GameCacheRecord eligible[6];bool more;
+    assert(title_inventory_appointments_at(path,0,eligible,6,&more)==-1);
     fake.fail_list=false;assert(title_inventory_refresh_at(path,&backend));
     assert(lookup(path,0x202,0x222,&out,NULL)==GameCacheFound && !strcmp(out.english,"Host B"));
     assert(lookup(previous,0x101,0x111,&out,NULL)==GameCacheFound);
@@ -110,6 +112,10 @@ int main(void)
     bool fail_page=false;TitleInventoryBackend many={&fail_page,list_many,load_many};
     assert(title_inventory_refresh_at(path,&many));
     assert(lookup(path,0x1040,0x2040,&out,&generation)==GameCacheFound && generation==1 && out.application_id==0x1040);
+    assert(title_inventory_appointments_at(path,0,eligible,6,&more)==6 && more);
+    assert(eligible[0].application_id==0x1000 && eligible[5].application_id==0x1005);
+    assert(title_inventory_appointments_at(path,60,eligible,6,&more)==5 && !more);
+    assert(eligible[0].application_id==0x103c && eligible[4].application_id==0x1040);
     fail_page=true;assert(!title_inventory_refresh_at(path,&many));
     assert(lookup(path,0x1040,0x2040,&out,&generation)==GameCacheFound && generation==1);
     unlink(path);
@@ -117,6 +123,9 @@ int main(void)
     assert(title_inventory_refresh_at(path,&no_lcid_backend));
     assert(lookup(path,0x101,0,&out,NULL)==GameCacheFound && out.application_id==0x101 && !strcmp(out.english,"Host A"));
     assert(lookup(path,0x999,0x111,&out,NULL)==GameCacheUnknown && !out.application_id);
+    assert(title_inventory_appointments_at(path,0,eligible,6,&more)==1 && !more);
+    assert(eligible[0].application_id==0x202);
+    assert(title_inventory_appointments_at(path,1,eligible,6,&more)==0 && !more);
     unlink(path);rmdir(dir);
-    puts("Title inventory: SHA, dual IDs, ambiguity, failure preservation and recovery passed");
+    puts("Title inventory: SHA, dual IDs, ambiguity, recovery and paged Local Wireless selection passed");
 }

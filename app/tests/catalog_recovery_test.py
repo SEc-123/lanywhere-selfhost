@@ -88,7 +88,7 @@ int main(int argc, char **argv)
     room.game_id=UINT64_C(0xDEADBEEFDEADBEEF);
     assert(strstr(room_title(&room,fallback,sizeof(fallback)),"DEADBEEFDEADBEEF"));
 
-    View v={.count=1,.config_state=RelayConfigReady};
+    View v={.count=1,.config_state=RelayConfigReady,.discovery=LobbyDiscoveryLegacy};
     observed.state=StateError;
     strcpy(observed.error,"se perdió la conexión con el servidor");
     poll_lanywhere(&v);

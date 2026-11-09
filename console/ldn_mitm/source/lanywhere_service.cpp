@@ -6,6 +6,8 @@
  * the GNU General Public License, version 2, as published by the Free Software Foundation.
  */
 #include "lanywhere_service.hpp"
+#include "appointment_notifier.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace ams::mitm::lanywhere {
@@ -17,6 +19,19 @@ namespace ams::mitm::lanywhere {
             const size_t n = std::min(src.GetSize(), dst_size - 1);
             std::memcpy(dst, src.GetPointer(), n);
             dst[n] = '\0';
+        }
+
+        void UseBootAppointmentParticipant(AppointmentRequest *request) {
+            static constinit os::SdkMutex lock;
+            static u8 participant[16]{};
+            static bool initialized = false;
+            std::scoped_lock guard(lock);
+            if (!initialized) {
+                do { os::GenerateRandomBytes(participant, sizeof(participant)); }
+                while (!std::any_of(participant, participant + sizeof(participant), [](u8 value) { return value != 0; }));
+                initialized = true;
+            }
+            std::memcpy(request->participant, participant, sizeof(participant));
         }
 
     }
@@ -134,6 +149,105 @@ namespace ams::mitm::lanywhere {
             static_cast<void>(FindGroupSummaries(offset, &result, reinterpret_cast<GroupSummaryV2 *>(out.GetPointer()), out.GetSize() / sizeof(GroupSummaryV2)));
         page.SetValue(result);
         R_SUCCEED();
+    }
+
+    Result LanywhereService::AppointmentExchange(const sf::InBuffer &request, const sf::OutBuffer &out) {
+        if (out.GetSize() != sizeof(AppointmentResponse)) return ResultRelayFailed();
+        AppointmentResponse response{};
+        response.status = AppointmentUnavailable;
+        response.next = APPOINTMENT_END;
+        if (request.GetSize() == sizeof(AppointmentRequest)) {
+            AppointmentRequest input{};
+            std::memcpy(&input, request.GetPointer(), sizeof(input));
+            UseBootAppointmentParticipant(&input);
+            ExchangeAppointment(input, &response);
+            if (response.status == AppointmentOk && input.op == AppointmentFollow) {
+                const AppointmentRow *ready = nullptr;
+                for (size_t i = 0; i < response.count; ++i)
+                    if (response.rows[i].id == input.id && response.rows[i].followed) ready = &response.rows[i];
+                if (ready) {
+                    const AppointmentWatchRequest watch{ready->id, ready->starts_at, ready->game_id, ready->app_id, 1, 0};
+                    static_cast<void>(lanywhere::SetAppointmentWatch(watch, false));
+                }
+            } else if (response.status == AppointmentOk && input.op == AppointmentUnfollow) {
+                lanywhere::CancelAppointmentReady(input.id);
+            }
+        }
+        std::memcpy(out.GetPointer(), &response, sizeof(response));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::ListAppointmentRooms(AppointmentRoomsRequest request, sf::Out<GroupPageV2> page, const sf::OutBuffer &out) {
+        GroupPageV2 result{-1, GroupPageEnd, 0, ListStatusProtocol};
+        if (!request.reserved && request.game_id && request.game_id != UINT64_MAX &&
+            out.GetSize() >= GroupPageSize * sizeof(GroupSummaryV2)) {
+            static_cast<void>(FindGroupSummaries(request.offset, &result,
+                reinterpret_cast<GroupSummaryV2 *>(out.GetPointer()), out.GetSize() / sizeof(GroupSummaryV2),
+                request.game_id, true));
+        }
+        page.SetValue(result);
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::SetAppointmentWatch(AppointmentWatchRequest request, sf::Out<u32> status) {
+        status.SetValue(lanywhere::SetAppointmentWatch(request, true));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::GetAppointmentWatch(sf::Out<u64> id) {
+        id.SetValue(lanywhere::GetAppointmentWatch());
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::SetRoomPasscode(RoomPasscodeChange change, sf::Out<u32> status) {
+        status.SetValue(ShareRoomPasscode(change));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::GetRoomPasscode(RoomPasscodeLookup lookup, sf::Out<RoomPasscodeReply> reply) {
+        reply.SetValue(LookupRoomPasscode(lookup));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::GetRoomPasscodeHost(sf::Out<RoomPasscodeHost> host) {
+        host.SetValue(DescribeRoomPasscodeHost());
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::SetGameRoomAccess(RoomAccessChange change, sf::Out<u32> status) {
+        status.SetValue(lanywhere::SetRoomAccess(change));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::UnlockGameRoom(RoomAccessUnlock unlock, sf::Out<u32> status) {
+        status.SetValue(lanywhere::UnlockRoomAccess(unlock));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::ReadAppointmentSubscriptions(const sf::OutBuffer &out) {
+        if (out.GetSize() != sizeof(AppointmentSubscriptions)) return ResultRelayFailed();
+        AppointmentSubscriptions result{};
+        GetAppointmentSubscriptions(&result);
+        std::memcpy(out.GetPointer(), &result, sizeof(result));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::UpdateAppointmentSubscription(AppointmentWatchRequest request, sf::Out<u32> status) {
+        status.SetValue(SetAppointmentSubscription(request));
+        R_SUCCEED();
+    }
+
+
+    Result LanywhereService::ListUnifiedRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out) {
+        UnifiedPage result{-1, UNIFIED_LOBBY_END, 0, 0, 0, ListStatusProtocol};
+        if (out.GetSize() >= UNIFIED_LOBBY_PAGE_SIZE * sizeof(UnifiedGroup))
+            FindUnifiedRooms(request, &result, reinterpret_cast<UnifiedGroup *>(out.GetPointer()), out.GetSize() / sizeof(UnifiedGroup));
+        page.SetValue(result);
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::SelectUnifiedLobbyRoom(UnifiedRoomRequest request) {
+        R_RETURN(lanywhere::SelectUnifiedRoom(request));
     }
 
 }

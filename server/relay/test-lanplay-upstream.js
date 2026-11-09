@@ -130,6 +130,26 @@ test('realm budget protects held member leases and recycles only released query 
 });
 
 
+test('foreground room entry reclaims a cold discovery-only realm without touching a player lease', {timeout:10000}, async t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'realm-discovery-priority-')),file=path.join(dir,'child.cjs');
+ fs.writeFileSync(file,`const delay = process.env.LANYWHERE_LANPLAY_REALM === 'discovery' ? 2000 : 0;
+setTimeout(() => process.send({type:'ready',port:1234}), delay);
+setInterval(()=>{},1000);`);
+ const manager=realms({providers:[{id:'existing'},{id:'discovery'},{id:'joining'}],serverFile:file,maxRealms:2});
+ t.after(async()=>{await manager.shutdown();fs.rmSync(dir,{recursive:true,force:true});});
+ const [existing,discovery,joining]=manager.providers;
+ const player=await existing.acquire();
+ const playerPid=manager.snapshot().find(r=>r.id==='existing').pid;
+ const preempted=assert.rejects(discovery.acquire({discoveryOnly:true}),e=>e.code==='UPSTREAM_UNAVAILABLE');
+ await until(()=>manager.snapshot().some(r=>r.id==='discovery'&&!r.ready));
+ await assert.rejects(joining.acquire({discoveryOnly:true}),e=>e.code==='REALM_CAPACITY');
+ const admitted=await joining.acquire();
+ await preempted;
+ assert.deepEqual(manager.snapshot().map(r=>r.id).sort(),['existing','joining']);
+ assert.equal(manager.snapshot().find(r=>r.id==='existing').pid,playerPid);
+ player.release();admitted.release();
+});
+
 test('explicit provider registry preserves original destinations and excludes the failed candidate',()=>{
  const catalog=require('./lanplay-providers');const byId=new Map(catalog.map(p=>[p.id,p]));
  assert.equal(byId.size,catalog.length);assert(catalog.every(p=>p.id.length<=32));

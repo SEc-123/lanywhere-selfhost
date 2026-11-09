@@ -56,14 +56,19 @@ class StateBackupTest(unittest.TestCase):
         return path
 
     def test_round_trip_preserves_a_private_archive_and_restores_state(self):
+        appointments = self.files / 'appointments.json'
+        scheduled = b'{"version":2,"events":[{"id":"1","starts":"2000000040","game":"12","app":"34"}]}'
+        appointments.write_bytes(scheduled)
         path = self.valid_backup()
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(STATE.read_archive(path)['traffic.json'], counter(self.month, 100))
         self.env.write_bytes(LOCAL_ENV)
         self.traffic.write_bytes(counter(self.month, 50))
+        appointments.unlink()
         STATE.restore(path)
         self.assertEqual(self.env.read_bytes(), INITIAL_ENV)
         self.assertEqual(self.traffic.read_bytes(), counter(self.month, 100))
+        self.assertEqual(appointments.read_bytes(), scheduled)
 
     def test_counter_cannot_move_backwards_or_replace_corrupt_current_state(self):
         path = self.valid_backup()

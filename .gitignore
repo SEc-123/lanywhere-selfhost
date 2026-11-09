@@ -25,6 +25,7 @@ __pycache__/
 *.log
 server/relay/grupo.bin
 server/relay/traffic.json
+server/relay/appointments.json
 /app/data/game_catalog.bin
 
 # Binarios de la consola (se publican en Releases, no en el código)

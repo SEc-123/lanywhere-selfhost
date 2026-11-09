@@ -100,6 +100,8 @@ try {
     }
     await suite('Upstream provider and token isolation', process.execPath, ['--test', 'server/relay/test-upstream-gateway.js']);
     await suite('Relay inbound control deadline', process.execPath, ['--test', 'server/relay/test-inbound-deadline.js']);
+    await suite('Durable appointments and self-network isolation', process.execPath, ['--test',
+        'server/relay/test-appointments.js', 'server/relay/test-appointments-e2e.js']);
     await suite('Realm query-cache recycling and protected leases', process.execPath, ['--test', 'server/relay/test-realm-policy.js']);
     await suite('Host game identity metadata', process.execPath, ['--test', 'server/relay/test-room-metadata.js']);
     await suite('LAN Play upstream realms', process.execPath, ['--test', 'server/relay/test-lanplay-upstream.js']);
@@ -123,6 +125,11 @@ try {
     if (lcidBuilt) await suite('Canonical self IDs and legacy wire policy', lcidBinary, []);
     await suite('Actual game ID cache and create/scan/connect entrypoints', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/lcid_entry_test.py']);
     await suite('Actual game ID route and owned-room cleanup', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/lcid_route_test.py']);
+    await suite('Native game password IPC and bounded transport', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/room_passcode_test.py']);
+    await suite('Unified lobby discovery, source isolation and stable paging', process.execPath, ['--test', 'server/relay/test-unified-lobby.js']);
+    await suite('Native appointment IPC and self-network isolation', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/appointments_ipc_test.py']);
+    await suite('Public game password relay ownership and lifecycle', process.execPath, ['--test', 'server/relay/test-game-code-e2e.js']);
+    await suite('Native open-room alert and Ultrahand payload', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/notifier_behavior_test.py']);
     await suite('Native typed listing failures over loopback', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/list_status_test.py']);
     await suite('Native TCP relay epochs, failure shutdown and negotiation', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/tcp_relay_glue_test.py']);
     await suite('Native relay reconnect identity, deadlines and cancellation', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/transport_recovery_test.py']);
@@ -171,6 +178,8 @@ try {
     if (uiBuilt) await suite('App translation formats and fallback', uiBinary, []);
     await suite('App Chinese UI key coverage', process.env.PYTHON || 'python3', ['-B', 'app/tests/ui_text_coverage_test.py']);
     await suite('App actual input routing and nickname boundaries', process.env.PYTHON || 'python3', ['-B', 'app/tests/input_routing_test.py']);
+    await suite('Game password input, display and live refresh', process.env.PYTHON || 'python3', ['-B', 'app/tests/room_password_test.py']);
+    await suite('Appointment UI, language, precise time and room handoff', process.env.PYTHON || 'python3', ['-B', 'app/tests/appointments_ui_test.py']);
     const localeBinary = path.join(temp, 'ui-locale-test');
     const localeBuilt = await suite('App language preference build', process.env.CC || 'cc',
         ['-std=c11', '-Wall', '-Wextra', '-Werror', 'app/tests/ui_locale_test.c', '-o', localeBinary]);

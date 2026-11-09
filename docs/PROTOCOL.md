@@ -202,3 +202,70 @@ decide when gameplay begins. It cannot synthesize a game host, force a menu refr
 ## Version 0.4.2 extensions
 
 See [UDP v2 and filtered discovery](UDP-V2.md) for the negotiated fragmentation, nonce heartbeat, replay bounds, and complete ScanFilter wire contract.
+
+## Appointments (self network)
+
+TCP frame `0x26` takes the 56-byte little-endian `AppointmentRequest` and replies with `0xa6`
+containing a 264-byte `AppointmentResponse`. Layouts and statuses are defined in
+`common/appointments.h`. Operations are list (1), create (2), ready (3) and cancel ready (4).
+A duplicate game/edition/start-minute create returns the existing appointment list. The
+saved record contains only its random event ID, UTC start, local communication ID and
+application ID.
+
+Ready is available from 30 minutes before the start through two hours after it. The server
+uses a per-boot opaque nonce to count at most one five-minute lease per console. The nonce,
+lease and counts are transient. A successful Ready response starts its page with the
+matching appointment.
+
+Switch IPC 13 exchanges appointment frames. IPC 14 lists ordinary self-network public
+rooms for one local communication ID. IPC 15/16 set and read a single console-local alert.
+The alert checks the same room listing over a separate connection and uses the Ultrahand
+notification API. It expires two hours after the start. The legacy single alert is cleared on reboot.
+
+IPC 22 reads locally joined appointment IDs. IPC 23 joins or leaves an appointment
+on this console, up to 24 saved appointments. Joined events can arm room alerts
+across reboots. Listing, creation, and readiness use the configured self-hosted
+endpoint independently of the selected game network.
+
+## Game room access (self network)
+
+Capability `512` supports password sharing. Capability `1024` adds a hidden password
+and an inclusive lobby view. The root self-hosted relay advertises these flags.
+Other networks retain their own room policies.
+
+A metadata page request with a thirteenth byte of 1 lists published game rooms,
+including full and password-protected rooms. Rows are still 336 bytes. Byte 35
+holds the password mode (0 none, 1 shared, 2 hidden). Legacy discovery and automatic
+matching exclude hidden rooms. The in-game host still controls its own game policy.
+
+TCP frame `0x27` exchanges a 48-byte request for a 32-byte response in frame `0xa7`.
+Layouts are in `common/room_passcode.h`. The request names the exact relay room
+and game ID. The host can share, hide, or clear the password using its live room
+token and current network address. A lookup for a hidden password returns status
+6 with no password bytes. A wrong entry returns status 7.
+
+A correct entry grants short-lived exact-match access. The guest appends the
+16-byte grant to the ordinary 122-byte reservation request. The relay checks it
+before assigning or admitting the guest. Password or session changes invalidate
+outstanding access. Legacy direct joins cannot enter a protected room. Players
+already admitted can use normal reconnection. Passwords and grants stay in memory.
+
+Switch IPC 17–19 retain their sharing/lookup/host roles. IPC 20 sets visibility and
+password together. IPC 21 checks the submitted password and arms the exact match.
+
+## Unified lobby
+
+Root capability `2048` enables a read-only lobby across the self network and the
+enabled upstream networks. Frame `0x28` takes `u32 offset, u32 snapshot`. Snapshot
+zero starts a fresh view. Reply `0xa8` carries `u32 snapshot, u32 next, u8 count,
+u8 available, u8 total, u8 status`, then up to six rows. Status 1 means that the
+snapshot has expired. Start again at offset zero.
+
+Each 376-byte row contains the ordinary 336-byte summary, the NUL-terminated
+provider ID in 33 bytes, and seven zero bytes. A room is identified by provider,
+LCID and its six-byte code. The server shares one discovery cache across clients.
+The source counts distinguish an empty result from an incomplete search.
+
+IPC 24 reads these rows. IPC 25 selects a provider-qualified room for the next
+in-game search. The relay connection retains that provider for the active room
+and reconnects on the same route. New game rooms use the self network.

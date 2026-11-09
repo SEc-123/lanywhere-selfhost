@@ -4,7 +4,8 @@
 // validation remains in the normal protocol handlers.
 function knownCommand(type, body) {
     return ((type >= 1 && type <= 0x0d) || type === 0x20 || type === 0x21 ||
-            type === 0x22 || type === 0x24) && (type !== 5 || body.length === 0);
+            type === 0x22 || type === 0x24 || type === 0x26 || (type === 0x27 && body.length === 48) ||
+            (type === 0x28 && body.length === 8)) && (type !== 5 || body.length === 0);
 }
 
 function create(socket, timeoutMs) {

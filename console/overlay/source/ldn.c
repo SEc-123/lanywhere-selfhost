@@ -84,3 +84,35 @@ Result lanywhereOverlayGetMatch(Service *s, LanywhereOverlayMatch *out) {
     *out = value;
     return 0;
 }
+
+Result lanywhereOverlayGetPasscodeHost(Service *s, RoomPasscodeHost *out) {
+    memset(out, 0, sizeof(*out));
+    RoomPasscodeHost value = {0};
+    Result rc = serviceDispatchOut(s, ROOM_PASSCODE_IPC_HOST, value);
+    if (R_FAILED(rc)) return rc;
+    if (value.reserved || value.status > RoomPasscodeBusy)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    if (value.status == RoomPasscodeOk) {
+        if (value.room[6] || value.room[7])
+            return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+        for (size_t i = 0; i < 6; ++i) {
+            const char c = value.room[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
+                return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+        }
+        *out = value;
+    } else {
+        out->status = value.status;
+    }
+    return 0;
+}
+
+Result lanywhereOverlaySetRoomAccess(Service *s, const RoomAccessChange *change, u32 *status) {
+    *status = RoomPasscodeUnavailable;
+    u32 value = RoomPasscodeUnavailable;
+    Result rc = serviceDispatchInOut(s, ROOM_ACCESS_IPC_SET, *change, value);
+    if (R_FAILED(rc)) return rc;
+    if (value > RoomPasscodeBusy) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    *status = value;
+    return 0;
+}

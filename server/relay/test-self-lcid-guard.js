@@ -36,7 +36,7 @@ function reserve(game){const b=Buffer.alloc(122);b.fill(0x31,0,16);b.writeBigUIn
 
 test('pure self rejects unresolved LCID before rooms, seats, tickets or search state are created',{timeout:15000},async t=>{
  const service=await launch(t),old=await service.open('OwnOldClient');
- old.send(0x20,Buffer.from('self'));assert.equal((await old.frame(0xa0)).readUInt32LE(),255);
+ old.send(0x20,Buffer.from('self'));assert.equal((await old.frame(0xa0)).readUInt32LE() & 255,255);
  for(let i=0;i<11;i++)await rejected(old,1,admission(old,F)); // Does not spend the default ten-CREATE quota.
  let state=await service.stats();assert.equal(state.now.rooms,0);assert.equal(state.now.online,0);assert.equal(state.counters.roomsCreated||0,0);
  await rejected(old,1,Buffer.alloc(39,0xff),4);await old.create(0n);old.send(3);await old.barrier();

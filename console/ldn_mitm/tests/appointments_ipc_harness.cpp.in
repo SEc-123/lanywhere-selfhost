@@ -1,0 +1,218 @@
+#define R_SUCCEED() return 0
+namespace lanywhere {
+static unsigned watch_calls=0,cancel_calls=0;static bool watch_explicit=false;
+static AppointmentWatchRequest watch_request{};static u64 watched_id=0,cancelled_id=0;
+static u32 watch_status=AppointmentOk;
+u32 SetAppointmentWatch(const AppointmentWatchRequest&r,bool explicit_watch){watch_calls++;watch_request=r;watch_explicit=explicit_watch;return watch_status;}
+u64 GetAppointmentWatch(){return watched_id;}
+void CancelAppointmentReady(u64 id){cancel_calls++;cancelled_id=id;}
+}
+static unsigned subscription_reads = 0, subscription_writes = 0;
+static AppointmentWatchRequest subscription_request{};
+static u32 subscription_status = AppointmentOk;
+
+void GetAppointmentSubscriptions(AppointmentSubscriptions *out) {
+    ++subscription_reads;
+    *out = {2, 0, {7, 9}};
+}
+
+u32 SetAppointmentSubscription(const AppointmentWatchRequest &request) {
+    ++subscription_writes;
+    subscription_request = request;
+    return subscription_status;
+}
+
+namespace sf {
+struct InBuffer {const void*p;size_t size;const void*GetPointer()const{return p;}size_t GetSize()const{return size;}};
+struct OutBuffer {void*p;size_t size;void*GetPointer()const{return p;}size_t GetSize()const{return size;}};
+template<class T>struct Out {T*p;void SetValue(const T&v)const{*p=v;}};
+}
+class LanywhereService {public:
+ Result AppointmentExchange(const sf::InBuffer&,const sf::OutBuffer&);
+ Result ListAppointmentRooms(AppointmentRoomsRequest,sf::Out<GroupPageV2>,const sf::OutBuffer&);
+ Result SetAppointmentWatch(AppointmentWatchRequest,sf::Out<u32>);
+ Result GetAppointmentWatch(sf::Out<u64>);
+ Result ReadAppointmentSubscriptions(const sf::OutBuffer&);
+ Result UpdateAppointmentSubscription(AppointmentWatchRequest,sf::Out<u32>);
+};
+/* ACTUAL_IPC */
+
+static std::vector<u8> appointmentReply(u32 status=AppointmentOk) {
+ std::vector<u8>b(sizeof(AppointmentResponse));put32(b.data(),status);put32(b.data()+8,APPOINTMENT_END);put64(b.data()+16,1800000000ULL);
+ if(status==AppointmentOk){put32(b.data()+4,1);put64(b.data()+24,7);put64(b.data()+32,1800000060ULL);put64(b.data()+40,42);put64(b.data()+48,0x01008F6008C5E000ULL);put32(b.data()+56,3);b[60]=1;}
+ return b;
+}
+class AppointmentRelay {
+ int listener;std::thread thread;std::atomic<bool>stop{false};
+ public:u16 port;std::atomic<int>connections{0},queries{0},finds{0};std::vector<u8>payload,seen;std::atomic<u8> reply_type{APPOINTMENT_RESPONSE_TYPE};
+ std::atomic<bool> silent{false},mutate{false},mutate_caps{false};
+ std::atomic<u16> endpoint_after_request{0},endpoint_after_caps{0};
+ std::atomic<u32> caps{64};std::atomic<u64> game{42};
+ std::atomic<u64>requested_game{0};std::atomic<size_t>requested_size{0};
+ AppointmentRelay(std::vector<u8>data=appointmentReply()):payload(std::move(data)){
+  listener=::socket(AF_INET,SOCK_STREAM,0);assert(listener>=0);sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  assert(!::bind(listener,(sockaddr*)&a,sizeof(a)));assert(!::listen(listener,2));socklen_t n=sizeof(a);assert(!::getsockname(listener,(sockaddr*)&a,&n));port=ntohs(a.sin_port);
+  thread=std::thread([this]{run();});
+ }
+ ~AppointmentRelay(){stop=true;::shutdown(listener,SHUT_RDWR);::close(listener);thread.join();}
+ void run(){while(!stop){pollfd wait{listener,POLLIN,0};if(::poll(&wait,1,50)<=0)continue;int fd=::accept(listener,nullptr,nullptr);if(fd<0)continue;connections++;
+  timeval timeout{2,0};::setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));u8 type;std::vector<u8>body;
+  while(receive(fd,type,body)){
+   if(type==APPOINTMENT_REQUEST_TYPE){
+    seen=body;queries++;
+    if (const u16 endpoint = endpoint_after_request) config(endpoint,"self");
+    else if(mutate)config(port,"lanywhere-public");
+    if(silent)continue;
+    response(fd,reply_type,payload);
+   }
+   else if(type==T_Caps){
+    if (const u16 endpoint = endpoint_after_caps) config(endpoint,"self");
+    else if(mutate_caps)config(port,"lanywhere-public");
+    std::vector<u8>b(4);put32(b.data(),caps);response(fd,T_CapsReply,b);
+   }
+   else if(type==T_FindMetadataPage||type==T_FindPage||type==T_Find){finds++;assert(body.size()>=8);requested_game=le64(body.data());requested_size=body.size();
+    const bool metadata=type==T_FindMetadataPage,paged=type!=T_Find;const size_t head=paged?5:1,record=metadata?sizeof(GroupSummaryV2):GroupRecordSize;
+    std::vector<u8>b(head+record);if(paged)put32(b.data(),GroupPageEnd);b[head-1]=1;std::memcpy(b.data()+head,"ABC234",6);
+    if(metadata){put64(b.data()+head+8,game);b[head+32]=1;b[head+33]=4;std::memcpy(b.data()+head+40,"Host",4);}
+    else{put64(b.data()+head+6,game);b[head+6+0x67]=1;b[head+6+0x66]=4;}
+    if (const u16 endpoint = endpoint_after_request) config(endpoint,"self");
+    else if(mutate)config(port,"lanywhere-public");
+    response(fd,metadata?T_MetadataPage:paged?T_Page:T_Groups,b);
+   }else{assert(false && "No selection, room mutation or matching command is allowed");}
+  }::close(fd);
+ }}
+};
+static AppointmentRequest request(u8 op=AppointmentList){AppointmentRequest r{};r.op=op;r.participant[0]=7;return r;}
+static bool unavailable(const AppointmentResponse&r){return r.status==AppointmentUnavailable&&!r.count&&r.next==APPOINTMENT_END&&!r.reserved&&!r.now;}
+int main(){
+ unsigned checks=0;LanywhereService service;AppointmentResponse out{};
+ {AppointmentRelay relay;config(relay.port,"self");auto req=request();g_state=RelayState::InRoom;std::strcpy(g_error,"existing game status");matched=true;const int enters=enter_calls;
+  assert(!service.AppointmentExchange({&req,sizeof(req)},{&out,sizeof(out)}));assert(out.status==AppointmentOk&&out.count==1&&out.now==1800000000ULL&&out.rows[0].starts_at==1800000060ULL&&out.rows[0].app_id==0x01008F6008C5E000ULL);assert(!std::memcmp(&out,relay.payload.data(),sizeof(out)));
+  auto injected=req;std::memset(injected.participant,0x65,16);
+  assert(relay.queries==1&&relay.seen.size()==sizeof(req)&&!std::memcmp(relay.seen.data(),&injected,sizeof(req)));
+  assert(req.participant[0]==7&&req.participant[1]==0&&appointment_random_calls==1);
+  assert(g_state==RelayState::InRoom&&!std::strcmp(g_error,"existing game status")&&matched&&enter_calls==enters);checks++;}
+ for(u8 op:{u8(AppointmentCreate),u8(AppointmentFollow),u8(AppointmentUnfollow)}){AppointmentRelay relay;config(relay.port,"lanplay-nl");auto req=request(op);if(op==AppointmentCreate){req.starts_at=1800000060;req.game_id=42;req.app_id=99;}else req.id=7;
+  ExchangeAppointment(req,&out);assert(out.status==AppointmentOk&&relay.queries==1&&!std::memcmp(relay.seen.data(),&req,sizeof(req)));checks++;}
+ for(u32 status:{u32(AppointmentUnavailable),u32(AppointmentInvalid),u32(AppointmentLimit),u32(AppointmentNotFound),u32(AppointmentStorage)}){AppointmentRelay relay(appointmentReply(status));config(relay.port,"self");ExchangeAppointment(request(),&out);assert(out.status==status&&out.now==1800000000ULL&&!out.count);checks++;}
+ for(int malformed=0;malformed<12;malformed++){auto b=appointmentReply();switch(malformed){
+  case 0:b.resize(263);break;case 1:b.resize(265);break;case 2:put32(b.data(),99);break;case 3:put32(b.data()+4,7);break;
+  case 4:b[12]=1;break;case 5:b[61]=1;break;case 6:b[60]=2;break;case 7:put64(b.data()+24,0);break;
+  case 8:put64(b.data()+40,UINT64_MAX);break;case 9:b[100]=1;break;case 10:put32(b.data()+8,0);break;
+  case 11:put32(b.data()+4,2);std::memcpy(b.data()+64,b.data()+24,40);break;}
+  AppointmentRelay relay(b);config(relay.port,"self");ExchangeAppointment(request(),&out);assert(unavailable(out));checks++;}
+ {AppointmentRelay relay({4});relay.reply_type=T_Error;config(relay.port,"self");ExchangeAppointment(request(),&out);assert(unavailable(out));checks++;}
+ {AppointmentRelay relay;relay.silent=true;config(relay.port,"self");ExchangeAppointment(request(),&out);assert(unavailable(out));checks++;}
+ {
+  AppointmentRelay relay;
+  config(relay.port, "lanywhere-public");
+  ExchangeAppointment(request(), &out);
+  assert(out.status == AppointmentOk && relay.connections == 1 && relay.queries == 1);
+  checks++;
+ }
+ {
+  AppointmentRelay relay;
+  relay.mutate = true;
+  config(relay.port, "self");
+  ExchangeAppointment(request(), &out);
+  assert(out.status == AppointmentOk && relay.queries == 1);
+  checks++;
+ }
+ {
+  AppointmentRelay original, replacement;
+  original.endpoint_after_request = replacement.port;
+  config(original.port, "self");
+  ExchangeAppointment(request(), &out);
+  assert(unavailable(out) && original.queries == 1 && !replacement.connections);
+  checks++;
+ }
+ {AppointmentRelay relay;config(relay.port,"self");auto bad=request();bad.reserved[1]=1;ExchangeAppointment(bad,&out);assert(out.status==AppointmentInvalid&&!relay.connections);
+  bad=request();std::memset(bad.participant,0,16);ExchangeAppointment(bad,&out);assert(out.status==AppointmentInvalid&&!relay.connections);
+  bad=request(AppointmentCreate);bad.starts_at=1;bad.game_id=UINT64_MAX;ExchangeAppointment(bad,&out);assert(out.status==AppointmentInvalid&&!relay.connections);checks+=3;}
+ {AppointmentRelay relay;config(relay.port,"self");auto req=request();for(size_t n:{size_t(55),size_t(57)}){assert(!service.AppointmentExchange({&req,n},{&out,sizeof(out)}));assert(unavailable(out)&&!relay.connections);checks++;}
+  unsigned char guard[280];std::memset(guard,0xcd,sizeof(guard));assert(service.AppointmentExchange({&req,sizeof(req)},{guard,263})!=0);assert(std::all_of(guard,guard+sizeof(guard),[](u8 x){return x==0xcd;}));checks++;}
+ for(u32 caps:{0u,2u,64u,64u|ROOM_ACCESS_CAPABILITY}){AppointmentRelay relay;relay.caps=caps;config(relay.port,"self");GroupPageV2 page{};GroupSummaryV2 groups[6]{};AppointmentRoomsRequest r{42,0,0};
+  assert(!service.ListAppointmentRooms(r,{&page},{groups,sizeof(groups)}));assert(page.count==1&&page.reserved==ListStatusOk&&groups[0].game_id==42&&relay.requested_game==42);
+  assert(relay.requested_size==(caps&ROOM_ACCESS_CAPABILITY?13:caps?12:15));checks++;}
+ {AppointmentRelay relay;relay.game=43;config(relay.port,"self");GroupPageV2 page{};GroupSummaryV2 groups[6]{};service.ListAppointmentRooms({42,0,0},{&page},{groups,sizeof(groups)});assert(page.count==-1&&page.reserved==ListStatusProtocol);checks++;}
+ for(bool during_caps:{false,true}){AppointmentRelay relay,replacement;
+  if(during_caps) relay.endpoint_after_caps=replacement.port; else relay.endpoint_after_request=replacement.port;
+  config(relay.port,"self");GroupPageV2 page{};GroupSummaryV2 groups[6]{};
+  service.ListAppointmentRooms({42,0,0},{&page},{groups,sizeof(groups)});
+  assert(page.count==-1&&page.reserved==ListStatusUnavailable&&!replacement.connections);
+  if(during_caps) assert(!relay.finds);
+  checks++;}
+ {AppointmentRelay relay;config(relay.port,"lanywhere-public");GroupPageV2 page{};GroupSummaryV2 groups[6]{};
+  service.ListAppointmentRooms({42,0,0},{&page},{groups,sizeof(groups)});
+  assert(page.count==1&&page.reserved==ListStatusOk&&relay.connections==1);checks++;}
+ {AppointmentRelay relay;config(relay.port,"self");GroupPageV2 page{};GroupSummaryV2 groups[6]{};for(auto r:{AppointmentRoomsRequest{0,0,0},AppointmentRoomsRequest{UINT64_MAX,0,0},AppointmentRoomsRequest{42,0,1}}){service.ListAppointmentRooms(r,{&page},{groups,sizeof(groups)});assert(page.count==-1&&!relay.connections);checks++;}}
+ // Background reminders pin the self endpoint, without altering the user's selected provider.
+ for (bool during_caps : {false, true}) {
+  AppointmentRelay relay;
+  relay.caps = CapabilityMetadata | ROOM_ACCESS_CAPABILITY;
+  relay.mutate = !during_caps;
+  relay.mutate_caps = during_caps;
+  config(relay.port, "lanplay-nl");
+  GroupPageV2 page{};
+  GroupSummaryV2 groups[6]{};
+  assert(FindGroupSummaries(0, &page, groups, 6, 42, true, true) == 1);
+  assert(page.reserved == ListStatusOk && groups[0].game_id == 42 && relay.requested_size == 12);
+  DiscoveryRoute selected{};
+  assert(CaptureDiscoveryRoute(&selected) && std::string(selected.provider) == "lanywhere-public");
+  checks++;
+ }
+ for (bool during_caps : {false, true}) {
+  AppointmentRelay original, replacement;
+  if (during_caps) original.endpoint_after_caps = replacement.port;
+  else original.endpoint_after_request = replacement.port;
+  config(original.port, "lanplay-nl");
+  GroupPageV2 page{};
+  GroupSummaryV2 groups[6]{};
+  assert(FindGroupSummaries(0, &page, groups, 6, 42, true, true) == -1);
+  assert(page.reserved == ListStatusUnavailable && original.finds == !during_caps && !replacement.connections);
+  checks++;
+ }
+ // IPC identity is module-boot scoped, independent of caller-provided bytes and service object lifetime.
+ {AppointmentRelay relay;config(relay.port,"self");auto req=request();std::memset(req.participant,0xff,16);LanywhereService second;
+  assert(!second.AppointmentExchange({&req,sizeof(req)},{&out,sizeof(out)}));assert(relay.queries==1&&appointment_random_calls==1);
+  assert(std::all_of(relay.seen.begin()+8,relay.seen.begin()+24,[](u8 x){return x==0x65;}));checks++;}
+ {AppointmentRelay relay;config(relay.port,"self");auto req=request(AppointmentFollow);req.id=7;unsigned before=lanywhere::watch_calls;
+  assert(!service.AppointmentExchange({&req,sizeof(req)},{&out,sizeof(out)}));assert(out.status==AppointmentOk&&lanywhere::watch_calls==before+1&&!lanywhere::watch_explicit);
+  assert(lanywhere::watch_request.id==7&&lanywhere::watch_request.starts_at==1800000060ULL&&lanywhere::watch_request.game_id==42&&lanywhere::watch_request.app_id==0x01008F6008C5E000ULL&&lanywhere::watch_request.enabled==1);checks++;}
+ {AppointmentRelay relay(appointmentReply(AppointmentUnavailable));config(relay.port,"self");auto req=request(AppointmentFollow);req.id=7;unsigned before=lanywhere::watch_calls;
+  service.AppointmentExchange({&req,sizeof(req)},{&out,sizeof(out)});assert(lanywhere::watch_calls==before);checks++;}
+ {AppointmentRelay relay;config(relay.port,"self");auto req=request(AppointmentUnfollow);req.id=7;unsigned before=lanywhere::cancel_calls;
+  service.AppointmentExchange({&req,sizeof(req)},{&out,sizeof(out)});assert(lanywhere::cancel_calls==before+1&&lanywhere::cancelled_id==7);checks++;}
+ {AppointmentWatchRequest watch{9,1800000120,42,99,1,0};u32 status=99;service.SetAppointmentWatch(watch,{&status});assert(status==AppointmentOk&&lanywhere::watch_explicit&&!std::memcmp(&watch,&lanywhere::watch_request,sizeof(watch)));
+  lanywhere::watched_id=9;u64 id=0;service.GetAppointmentWatch({&id});assert(id==9);lanywhere::watch_status=AppointmentUnavailable;service.SetAppointmentWatch(watch,{&status});assert(status==AppointmentUnavailable);checks+=3;}
+ {
+  std::array<u8, sizeof(AppointmentSubscriptions) + 2> guard;
+  guard.fill(0xcd);
+  for (size_t length : {sizeof(AppointmentSubscriptions) - 1, sizeof(AppointmentSubscriptions) + 1}) {
+   assert(service.ReadAppointmentSubscriptions({guard.data(), length}) != 0);
+   assert(subscription_reads == 0 && std::all_of(guard.begin(), guard.end(), [](u8 value) { return value == 0xcd; }));
+   checks++;
+  }
+  assert(service.ReadAppointmentSubscriptions({guard.data() + 1, sizeof(AppointmentSubscriptions)}) == 0);
+  AppointmentSubscriptions subscriptions{};
+  std::memcpy(&subscriptions, guard.data() + 1, sizeof(subscriptions));
+  assert(subscription_reads == 1 && subscriptions.count == 2 && subscriptions.reserved == 0);
+  assert(subscriptions.ids[0] == 7 && subscriptions.ids[1] == 9 && subscriptions.ids[2] == 0);
+  assert(guard.front() == 0xcd && guard.back() == 0xcd);
+  checks++;
+ }
+ {
+  AppointmentWatchRequest request{7, 1800000060, 42, 99, 1, 0};
+  u32 status = AppointmentUnavailable;
+  assert(service.UpdateAppointmentSubscription(request, {&status}) == 0);
+  assert(status == AppointmentOk && subscription_writes == 1 &&
+         std::memcmp(&request, &subscription_request, sizeof(request)) == 0);
+  request.enabled = 0;
+  subscription_status = AppointmentStorage;
+  assert(service.UpdateAppointmentSubscription(request, {&status}) == 0);
+  assert(status == AppointmentStorage && subscription_writes == 2 &&
+         std::memcmp(&request, &subscription_request, sizeof(request)) == 0);
+  checks += 2;
+ }
+ std::printf("Actual appointment IPC/wire: %u cases passed, exact LE payload/time, self isolation, lifecycle preservation and filtered room pages.\n",checks);
+}

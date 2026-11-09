@@ -1,0 +1,431 @@
+#include <functional>
+#include "room_passcode.h"
+#include "unified_lobby.h"
+
+#define R_SUCCEED() return 0
+static sockaddr_in g_server{};
+static char g_room_provider[33]{}, g_code[7]{};
+static bool g_recovering = false, g_public_group_sent = false;
+static u32 g_capabilities = 0, g_token = 0;
+static u64 g_game_id = 0;
+static u8 g_my_index = 0;
+static std::atomic<bool> g_stream_ready{false};
+static std::atomic<u64> g_stream_epoch{0};
+static os::SdkMutex g_match_lock;
+constexpr size_t MatchTicketSize = 16, MaxMembers = 8;
+constexpr u32 CapabilityMatch = 1;
+constexpr u8 T_Reserve = 0x09, T_Cancel = 0x0a, T_Reservation = 0x88;
+constexpr s64 WaitForGameMs = 90'000, PollIntervalMs = 1000;
+constexpr const char *ConfigError = "invalid config";
+
+namespace ldn {
+struct NetworkInfo {
+    struct LdnInfo {
+        u8 nodeCount, nodeCountMax;
+        struct Node { u16 localCommunicationVersion; u8 isConnected; } nodes[1];
+    } ldn;
+    std::array<u8, 0x480 - sizeof(LdnInfo)> unused;
+};
+static_assert(sizeof(NetworkInfo) == 0x480);
+}
+
+static bool InRoom() { return g_state == RelayState::InRoom; }
+static bool MatchesFilter(const ldn::NetworkInfo &, const u8 *) { return true; }
+bool QueryCapabilities(int fd, u32 *flags, int timeout_ms = MatchIoTimeoutMs, u32 *status = nullptr);
+u32 SetRoomAccess(const RoomAccessChange &change);
+
+/* ACTUAL_PASSCODE */
+
+namespace lanywhere {
+using ::DescribeRoomPasscodeHost;
+using ::LookupRoomPasscode;
+using ::ShareRoomPasscode;
+using ::SetRoomAccess;
+using ::UnlockRoomAccess;
+using ::SelectUnifiedRoom;
+}
+
+namespace sf {
+template<class T> struct Out {
+    T *value;
+    void SetValue(const T &output) const { *value = output; }
+};
+}
+
+class LanywhereService {
+public:
+    Result SetRoomPasscode(RoomPasscodeChange change, sf::Out<u32> status);
+    Result GetRoomPasscode(RoomPasscodeLookup lookup, sf::Out<RoomPasscodeReply> reply);
+    Result GetRoomPasscodeHost(sf::Out<RoomPasscodeHost> host);
+    Result SetGameRoomAccess(RoomAccessChange change, sf::Out<u32> status);
+    Result UnlockGameRoom(RoomAccessUnlock unlock, sf::Out<u32> status);
+    Result SelectUnifiedLobbyRoom(UnifiedRoomRequest request);
+};
+
+/* ACTUAL_IPC */
+
+class PasscodeRelay {
+    int listener;
+    std::thread worker;
+    std::atomic<bool> stop{false};
+    mutable std::mutex lock;
+    std::vector<std::vector<u8>> requests, reservations;
+public:
+    u16 port = 0;
+    explicit PasscodeRelay(std::vector<u8> payload = std::vector<u8>(32), u8 kind = ROOM_PASSCODE_RESPONSE_TYPE,
+                           std::function<void()> before_reply = {}) {
+        listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(listener >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(::bind(listener, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0);
+        assert(::listen(listener, 2) == 0);
+        socklen_t size = sizeof(address);
+        assert(::getsockname(listener, reinterpret_cast<sockaddr *>(&address), &size) == 0);
+        port = ntohs(address.sin_port);
+        worker = std::thread([this, payload, kind, before_reply] {
+            while (!stop) {
+                pollfd wait{listener, POLLIN, 0};
+                if (::poll(&wait, 1, 30) <= 0) continue;
+                const int fd = ::accept(listener, nullptr, nullptr);
+                if (fd < 0) continue;
+                timeval timeout{2, 0};
+                ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                u8 type = 0;
+                std::vector<u8> body;
+                while (receive(fd, type, body)) {
+                    if (type == ROOM_PASSCODE_REQUEST_TYPE) {
+                        assert(body.size() == sizeof(RoomPasscodeRequest));
+                        {
+                            std::scoped_lock guard(lock);
+                            requests.push_back(body);
+                        }
+                        if (before_reply) before_reply();
+                        response(fd, kind, payload);
+                    } else if (type == T_Caps) {
+                        assert(body.empty());
+                        std::vector<u8> flags(4);
+                        put32(flags.data(), CapabilityMatch | ROOM_ACCESS_CAPABILITY);
+                        response(fd, T_CapsReply, flags);
+                    } else if (type == T_Reserve) {
+                        {
+                            std::scoped_lock guard(lock);
+                            reservations.push_back(body);
+                        }
+                        response(fd, T_Reservation, std::vector<u8>(5));
+                    } else {
+                        assert(false && "unexpected passcode fixture frame");
+                    }
+                }
+                ::close(fd);
+            }
+        });
+    }
+    ~PasscodeRelay() {
+        stop = true;
+        ::shutdown(listener, SHUT_RDWR);
+        worker.join();
+        ::close(listener);
+    }
+    std::vector<std::vector<u8>> seen() const {
+        std::scoped_lock guard(lock);
+        return requests;
+    }
+    std::vector<std::vector<u8>> seen_reservations() const {
+        std::scoped_lock guard(lock);
+        return reservations;
+    }
+};
+
+static void host(u16 port) {
+    config(port, "self");
+    ClearSelectionLocked();
+    g_state = RelayState::InRoom;
+    g_server = {};
+    g_server.sin_family = AF_INET;
+    g_server.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    g_server.sin_port = htons(port);
+    std::strcpy(g_room_provider, "self");
+    std::strcpy(g_code, "ABC234");
+    g_game_id = 42;
+    g_token = 0x92345678;
+    g_stream_epoch = 11;
+    g_stream_ready = true;
+    g_my_index = 0;
+    g_recovering = false;
+    g_public_group_sent = true;
+    g_capabilities = ROOM_PASSCODE_CAPABILITY;
+}
+
+static void guest(u16 port, const char *provider = "self") {
+    config(port, provider);
+    ClearSelectionLocked();
+    g_state = RelayState::Idle;
+    g_match = {};
+    g_release_next = {};
+}
+
+static std::vector<u8> reply(const std::string &code = "", u32 status = RoomPasscodeOk) {
+    std::vector<u8> body(32);
+    assert(code.size() <= ROOM_PASSCODE_MAX);
+    put32(body.data(), status);
+    body[4] = static_cast<u8>(code.size());
+    std::memcpy(body.data() + 8, code.data(), code.size());
+    return body;
+}
+
+static void assert_reply_empty(const RoomPasscodeReply &reply, u32 status) {
+    assert(reply.status == status && !reply.length);
+    assert(std::all_of(std::begin(reply.passcode), std::end(reply.passcode), [](char c) { return c == 0; }));
+}
+
+int main() {
+    std::signal(SIGPIPE, SIG_IGN);
+    LanywhereService ipc;
+    RoomPasscodeHost description{};
+    RoomPasscodeChange change{"ABC234", {}};
+    RoomPasscodeLookup lookup{42, "ABC234"};
+    RoomPasscodeReply found{};
+    u32 status = UINT32_MAX;
+    const std::string code = " 00aB!z-9876543210_?234 ";
+    assert(code.size() == ROOM_PASSCODE_MAX);
+    std::memcpy(change.passcode, code.data(), code.size());
+    {
+        PasscodeRelay relay;
+        host(relay.port);
+        std::strcpy(g_error, "unchanged");
+        assert(ipc.GetRoomPasscodeHost({&description}) == 0);
+        assert(description.status == RoomPasscodeOk && std::string(description.room) == "ABC234");
+        assert(ipc.SetRoomPasscode(change, {&status}) == 0 && status == RoomPasscodeOk);
+        assert(ipc.SetRoomPasscode({"ABC234", {}}, {&status}) == 0 && status == RoomPasscodeOk);
+        const auto requests = relay.seen();
+        assert(requests.size() == 2);
+        for (const auto &body : requests) {
+            assert(std::memcmp(body.data(), "ABC234", 6) == 0 && body[6] == RoomPasscodeWrite);
+            assert(le32(body.data() + 8) == 0x92345678 && le32(body.data() + 12) == 0);
+            assert(le64(body.data() + 16) == 42);
+        }
+        assert(requests[0][7] == ROOM_PASSCODE_MAX && std::memcmp(requests[0].data() + 24, code.data(), code.size()) == 0);
+        assert(requests[1][7] == 0 && std::all_of(requests[1].begin() + 24, requests[1].end(), [](u8 b) { return b == 0; }));
+        assert(g_stream_epoch == 11 && g_state == RelayState::InRoom && std::string(g_error) == "unchanged");
+    }
+    {
+        PasscodeRelay relay;
+        host(relay.port);
+        assert(ShareRoomPasscode({"DEF567", {}}) == RoomPasscodeRoomUnavailable);
+        assert(ShareRoomPasscode({"ABC234x", {}}) == RoomPasscodeInvalid);
+        RoomPasscodeChange invalid{"ABC234", "0\0x"};
+        assert(ShareRoomPasscode(invalid) == RoomPasscodeInvalid);
+        invalid = {"ABC234", "\x7f"};
+        assert(ShareRoomPasscode(invalid) == RoomPasscodeInvalid);
+        g_my_index = 1;
+        assert(ShareRoomPasscode(change) == RoomPasscodeNotHost);
+        assert(DescribeRoomPasscodeHost().status == RoomPasscodeNotHost);
+        g_my_index = 0;
+        g_public_group_sent = false;
+        assert(ShareRoomPasscode(change) == RoomPasscodeRoomUnavailable);
+        g_public_group_sent = true;
+        g_recovering = true;
+        assert(ShareRoomPasscode(change) == RoomPasscodeRoomUnavailable);
+        g_recovering = false;
+        g_capabilities = 0;
+        assert(ShareRoomPasscode(change) == RoomPasscodeUnavailable);
+        g_capabilities = ROOM_PASSCODE_CAPABILITY;
+        std::strcpy(g_room_provider, "lanywhere-public");
+        assert(ShareRoomPasscode(change) == RoomPasscodeUnavailable);
+        assert(relay.seen().empty());
+    }
+    {
+        PasscodeRelay relay(reply(code));
+        config(relay.port, "self");
+        assert(ipc.GetRoomPasscode(lookup, {&found}) == 0);
+        assert(found.status == RoomPasscodeOk && found.length == code.size());
+        assert(std::memcmp(found.passcode, code.data(), code.size()) == 0);
+        const auto requests = relay.seen();
+        assert(requests.size() == 1 && requests[0][6] == RoomPasscodeRead && requests[0][7] == 0);
+        assert(le32(requests[0].data() + 8) == 0 && le64(requests[0].data() + 16) == 42);
+        config(relay.port, "lanywhere-public");
+        found = LookupRoomPasscode(lookup);
+        assert(found.status == RoomPasscodeOk && found.length == code.size());
+        assert_reply_empty(LookupRoomPasscode({0, "ABC234"}), RoomPasscodeInvalid);
+        assert(relay.seen().size() == 2);
+    }
+    for (int malformed = 0; malformed < 8; ++malformed) {
+        auto body = reply("019a");
+        u8 type = ROOM_PASSCODE_RESPONSE_TYPE;
+        switch (malformed) {
+        case 0: body.resize(31); break;
+        case 1: body.resize(33); break;
+        case 2: body[0] = 99; break;
+        case 3: body[4] = 25; break;
+        case 4: body[5] = 1; break;
+        case 5: body[8] = 0x1f; break;
+        case 6: body[12] = 1; break;
+        case 7: type = T_Error; break;
+        }
+        PasscodeRelay relay(body, type);
+        config(relay.port, "self");
+        assert_reply_empty(LookupRoomPasscode(lookup), RoomPasscodeUnavailable);
+    }
+    {
+        PasscodeRelay relay(reply(""), ROOM_PASSCODE_RESPONSE_TYPE, [] { ++g_stream_epoch; });
+        host(relay.port);
+        assert(ShareRoomPasscode(change) == RoomPasscodeUnavailable);
+        assert(relay.seen().size() == 1);
+    }
+    {
+        std::atomic<u16> port{0};
+        PasscodeRelay relay(reply(code), ROOM_PASSCODE_RESPONSE_TYPE, [&] { config(port.load() + 1, "lanywhere-public"); });
+        port = relay.port;
+        config(port.load(), "self");
+        assert_reply_empty(LookupRoomPasscode(lookup), RoomPasscodeUnavailable);
+        assert(relay.seen().size() == 1);
+    }
+    {
+        PasscodeRelay relay(reply("", RoomPasscodeBusy));
+        config(relay.port, "self");
+        assert_reply_empty(LookupRoomPasscode(lookup), RoomPasscodeBusy);
+    }
+    {
+        PasscodeRelay relay(reply("unexpected echo"));
+        host(relay.port);
+        assert(ShareRoomPasscode(change) == RoomPasscodeUnavailable);
+    }
+    {
+        PasscodeRelay relay;
+        host(relay.port);
+        RoomAccessChange access{change, 1, 0};
+        assert(ipc.SetGameRoomAccess(access, {&status}) == 0 && status == RoomPasscodeUnavailable);
+        assert(relay.seen().empty()); // Old server: no downgrade of hidden to shared.
+        g_capabilities |= ROOM_ACCESS_CAPABILITY;
+        assert(ipc.SetGameRoomAccess(access, {&status}) == 0 && status == RoomPasscodeOk);
+        access.hidden = 0;
+        assert(ipc.SetGameRoomAccess(access, {&status}) == 0 && status == RoomPasscodeOk);
+        access.change = {"ABC234", {}};
+        assert(ipc.SetGameRoomAccess(access, {&status}) == 0 && status == RoomPasscodeOk);
+        const auto requests = relay.seen();
+        assert(requests.size() == 3 && requests[0][6] == RoomPasscodeHide &&
+               requests[1][6] == RoomPasscodeWrite && requests[2][6] == RoomPasscodeWrite);
+        assert(requests[0][7] == code.size() && requests[2][7] == 0 &&
+               std::memcmp(requests[0].data() + 24, code.data(), code.size()) == 0);
+        access.hidden = 1;
+        assert(ipc.SetGameRoomAccess(access, {&status}) == 0 && status == RoomPasscodeInvalid);
+        access = {change, 2, 0};
+        assert(SetRoomAccess(access) == RoomPasscodeInvalid);
+        access = {change, 1, 1};
+        assert(SetRoomAccess(access) == RoomPasscodeInvalid);
+        assert(relay.seen().size() == requests.size());
+    }
+    {
+        PasscodeRelay relay(reply("", RoomPasscodeLocked));
+        guest(relay.port);
+        assert(ipc.GetRoomPasscode(lookup, {&found}) == 0);
+        assert_reply_empty(found, RoomPasscodeLocked);
+    }
+    RoomAccessUnlock unlock{42, "ABC234", "00Az!"};
+    const std::array<u8, ROOM_ACCESS_GRANT_SIZE> grant{
+        0x81, 0, 0xff, 0x20, 0x9a, 0x22, 0, 0x19, 0x76, 0xac, 0, 0x7f, 0xf0, 0xf2, 0xbe, 0x55,
+    };
+    const std::string binary_grant(reinterpret_cast<const char *>(grant.data()), grant.size());
+    {
+        PasscodeRelay relay(reply(binary_grant));
+        guest(relay.port, "lanywhere-public");
+        assert(ipc.UnlockGameRoom(unlock, {&status}) == 0 && status == RoomPasscodeOk);
+        GameRoute selected{};
+        assert(CaptureGameRoute(&selected) && std::string(selected.discovery.provider) == "self" &&
+               selected.discovery.selected_game_id == 42 && std::string(selected.discovery.selected_code) == "ABC234");
+        assert(g_match.status.mode == MatchMode::Exact && g_match.status.state == MatchState::WaitingForGame);
+        assert(std::string(g_match.status.room) == "ABC234" && std::string(g_match.exact) == "ABC234");
+        assert(g_match.ticket.server.sin_port == htons(relay.port));
+        assert(std::memcmp(g_match.room_grant, grant.data(), grant.size()) == 0);
+        const auto requests = relay.seen();
+        assert(requests.size() == 1 && requests[0][6] == RoomPasscodeAuthorize && requests[0][7] == 5);
+        assert(le32(requests[0].data() + 8) == 0 && le64(requests[0].data() + 16) == 42);
+        assert(std::memcmp(requests[0].data() + 24, "00Az!", 5) == 0);
+        // The game has begun its search. Poll the actual reservation writer.
+        g_match.status.state = MatchState::Searching;
+        put64(g_match.filter, 42);
+        PollMatch();
+        const auto reservations = relay.seen_reservations();
+        assert(reservations.size() == 1 && reservations[0].size() == 122 + grant.size());
+        const auto &wire = reservations[0];
+        assert(std::memcmp(wire.data() + 116, "ABC234", 6) == 0);
+        assert(std::memcmp(wire.data() + 122, grant.data(), grant.size()) == 0);
+        const std::string submitted(unlock.passcode);
+        assert(std::search(wire.begin(), wire.end(), submitted.begin(), submitted.end()) == wire.end());
+    }
+    {
+        PasscodeRelay relay;
+        guest(relay.port);
+        assert(StartMatch(MatchMode::Exact, "ABC234", nullptr, nullptr) == 0);
+        g_match.status.state = MatchState::Searching;
+        PollMatch();
+        const auto reservations = relay.seen_reservations();
+        assert(reservations.size() == 1 && reservations[0].size() == 122);
+    }
+    for (u32 rejection : {u32(RoomPasscodeWrong), u32(RoomPasscodeBusy), u32(RoomPasscodeRoomUnavailable)}) {
+        PasscodeRelay relay(reply("", rejection));
+        guest(relay.port);
+        assert(ipc.UnlockGameRoom(unlock, {&status}) == 0 && status == rejection);
+        assert(g_match.status.mode == MatchMode::Manual && relay.seen_reservations().empty());
+    }
+    for (int malformed = 0; malformed < 3; ++malformed) {
+        auto body = reply(binary_grant);
+        if (malformed == 0) body[4]--;
+        if (malformed == 1) std::fill(body.begin() + 8, body.end(), 0);
+        if (malformed == 2) body[8 + ROOM_ACCESS_GRANT_SIZE] = 1;
+        PasscodeRelay relay(body);
+        guest(relay.port);
+        assert(UnlockRoomAccess(unlock) == RoomPasscodeUnavailable && g_match.status.mode == MatchMode::Manual);
+    }
+    {
+        std::atomic<u16> port{0};
+        PasscodeRelay relay(reply(binary_grant), ROOM_PASSCODE_RESPONSE_TYPE, [&] {
+            config(port.load() + 1, "lanywhere-public");
+        });
+        port = relay.port;
+        guest(port.load());
+        assert(UnlockRoomAccess(unlock) == RoomPasscodeUnavailable && g_match.status.mode == MatchMode::Manual);
+        assert(relay.seen().size() == 1 && relay.seen_reservations().empty());
+    }
+    {
+        PasscodeRelay relay;
+        guest(relay.port, "lanywhere-public");
+        assert(UnlockRoomAccess(unlock) == RoomPasscodeUnavailable);
+        assert(UnlockRoomAccess({0, "ABC234", "1234"}) == RoomPasscodeInvalid);
+        assert(UnlockRoomAccess({42, "ABC234", {}}) == RoomPasscodeInvalid);
+        assert(UnlockRoomAccess({42, "ABC234", "0\0x"}) == RoomPasscodeInvalid);
+        assert(relay.seen().size() == 1); // Direct self authorization, even from an old external preference.
+    }
+    {
+        PasscodeRelay relay;
+        guest(relay.port, "lanplay-nl");
+        assert(ipc.SelectUnifiedLobbyRoom({42, "ABC234", "lanplay-cn-jax", {}}) == 0);
+        GameRoute selected{};
+        DiscoveryRoute saved{};
+        assert(CaptureGameRoute(&selected) && CaptureDiscoveryRoute(&saved));
+        assert(std::string(selected.discovery.provider) == "lanplay-cn-jax" &&
+               std::string(selected.discovery.selected_code) == "ABC234" && selected.discovery.selected_game_id == 42);
+        assert(std::string(saved.provider) == "lanplay-nl" && !saved.selection_epoch);
+        assert(g_match.status.mode == MatchMode::Manual && GameRouteStillCurrent(selected));
+        assert(ipc.SelectUnifiedLobbyRoom({UINT64_MAX, "ABC234", "lanplay-cn-jax", {}}) == 0);
+        assert(CaptureGameRoute(&selected) && selected.discovery.selected_game_id == UINT64_MAX);
+        assert(ipc.SelectUnifiedLobbyRoom({UINT64_MAX, "ABC234", "self", {}}) != 0);
+        assert(ipc.SelectUnifiedLobbyRoom({42, "ABC234", "arbitrary", {}}) != 0);
+        assert(ipc.SelectUnifiedLobbyRoom({42, "ABC234", "self", {1}}) != 0);
+        g_selection_until_ms = SelectionNowMs();
+        assert(!CaptureGameRoute(&selected));
+        CancelMatch();
+        assert(CaptureGameRoute(&selected) && !selected.discovery.selection_epoch &&
+               std::string(selected.discovery.provider) == "lanplay-nl");
+        assert(ipc.SelectUnifiedLobbyRoom({42, "ABC234", "self", {}}) == 0);
+        assert(CaptureGameRoute(&selected) && std::string(selected.discovery.provider) == "self" &&
+               g_match.status.mode == MatchMode::Exact && selected.discovery.selected_game_id == 42);
+        GameRoute host_route{};
+        assert(CaptureHostGameRoute(&host_route) && host_route.discovery.selection_epoch == HostRouteEpoch &&
+               !host_route.discovery.selected_game_id && GameRouteStillCurrent(host_route));
+        assert(relay.seen().empty());
+    }
+    std::puts("PASS native IPC17–21/25: hidden/share/clear, denied and stale unlocks, binary grants, scoped matchmaking, no password in reservations, and legacy frames");
+}

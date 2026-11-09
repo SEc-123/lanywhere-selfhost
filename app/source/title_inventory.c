@@ -29,6 +29,42 @@ static GameCacheResult open_valid(const char *path, FILE **file, uint64_t *bytes
     return result;
 }
 
+int title_inventory_appointments_at(const char *path, uint32_t offset, GameCacheRecord *out,
+                                    size_t capacity, bool *has_more)
+{
+    if (!path || !out || !capacity || capacity > GAME_CACHE_MAX_RECORDS || !has_more) return -1;
+    *has_more = false;
+    FILE *file = NULL;
+    uint64_t bytes = 0, generation = 0;
+    if (open_valid(path, &file, &bytes, &generation) != GameCacheUnknown) return -1;
+    size_t count = 0;
+    uint32_t eligible = 0;
+    for (uint64_t at = GAME_CACHE_HEADER_SIZE; at < bytes; at += GAME_CACHE_RECORD_SIZE) {
+        uint8_t raw[GAME_CACHE_RECORD_SIZE];
+        GameCacheRecord record;
+        if (!read_at(file, at, raw, sizeof(raw)) || !game_cache_decode_record(raw, &record)) {
+            fclose(file);
+            return -1;
+        }
+        bool valid_lcid = false;
+        for (size_t i = 0; i < GAME_CACHE_LCID_COUNT; i++) {
+            uint64_t id = record.local_communication_ids[i];
+            if (id && id != UINT64_MAX) {
+                valid_lcid = true;
+                break;
+            }
+        }
+        if (!valid_lcid || eligible++ < offset) continue;
+        if (count == capacity) {
+            *has_more = true;
+            break;
+        }
+        out[count++] = record;
+    }
+    fclose(file);
+    return (int)count;
+}
+
 static bool sibling(char out[InventoryPathMax],const char *path,const char *suffix)
 {
     if(!path || !*path)return false;

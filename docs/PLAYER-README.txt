@@ -8,18 +8,24 @@ Switch Online — 玩家安装与使用 / Player Guide
    不要把解压出来的外层文件夹直接复制进 SD 卡。
 2. 重启主机，进入原有 Atmosphère 环境，从相册打开 LANywhere Self-host。
    已安装兼容的 Tesla Menu 或 Ultrahand？从其菜单打开 LANywhere 查看或切换本地无线接管。找房仍用相册应用。
-3. 首次默认英文；点右上角语言按钮或按右摇杆 RS 切换中英文，选择会被记住。
-   教程按 B 进入大厅，R 可重看。
+3. 首次默认英文。点右上角或按右摇杆 RS 切换中英文。
+   启动后显示约局。按 B 看房间大厅，右下角「查看教程」可随时打开。
 @CONNECTION_ZH@
    房间名称优先读取本机或房主资料，缺少时查离线目录；不依赖 GAMES.txt 白名单。
-   按左摇杆 LS 或点“网络”选择线路，默认“自有网络”，无需填写 IP。
-4. 公开房：确认大厅「游戏建房」为公开（X 切换），在游戏中进入「本地无线」并创建房间；
-   加入时在大厅选择房间按 A，再到游戏的本地无线界面搜索并加入。
-5. 好友私房仅用于“自有网络/公共社区”：大厅按 Y，房主按 A 创建并分享邀请码；好友按 X 输入邀请码。
-   双方选择同一网络，再打开游戏的本地无线。按 + 返回游戏，B 退出或取消。
-   LAN Play 线路只使用游戏内的本地无线房间，不提供邀请码或快速匹配预留。
-   “本机可匹配”表示本地候选，不代表旧外部房主已提供准确游戏名。
-   线上找房不会同时搜索附近局域网；仅附近联机时，先离开线上房间并选择“仅本地”。
+   房间大厅汇总自有网络和各外部来源，每张房卡会标明线路。
+4. 在游戏中用「本地无线」建房。新房默认使用自有网络，并自动列在大厅。
+   房主可在 LANywhere 主应用或浮层设置游戏密码，并选择公开或隐藏。
+   公开时大厅显示密码。隐藏时房间仍可见，访客须先输入正确密码。
+   加入时在大厅选房，线路会随房间选定。回游戏用本地无线搜索，再按游戏提示加入。
+5. 外部房间使用来源服务器的联机规则。需要密码的自有房可在大厅先验证。
+   只和附近主机联机时，可以在浮层关闭本地无线接管。
+
+在首页直接点约局右侧「参加」，或按 A 参加选中的一场。可以参加多场，再点一次即可取消。
+按 L 发起约局，进入选游戏和时间的页面。时间按本机时区显示。
+约局开场后保留 2 小时，到期会从列表消失。
+临近开场可按 Y 准备，状态保留 5 分钟。按 X 查看约局对应的自有网络房间。
+参加后可收同款游戏的开房提醒。游戏内弹窗需使用 Ultrahand 并开启 API 通知。
+Ultrahand 下载：https://github.com/ppkantorski/Ultrahand-Overlay/releases
 
 候选示例 / Candidate examples（有本地无线资料，插件兼容性尚未验证）：
 Dying Light: Platinum Edition · Mario Kart 8 Deluxe · Monster Hunter Rise · Monster Hunter Generations Ultimate
@@ -39,17 +45,24 @@ Requires an already working Atmosphère setup compatible with your console firmw
    Already have a compatible Tesla Menu or Ultrahand setup? Open LANywhere there to check or toggle local wireless interception. Use the Album app to find rooms.
 3. English is the first-run default. Tap the top-right language control or press the right stick (RS)
    to switch between Chinese and English; your selection is remembered.
-   Press B to close the guide and enter the lobby; press R to reopen it.
+   The app opens Appointments. Press B for the room lobby.
+   Select View guide at the bottom right to open the tutorial.
 @CONNECTION_EN@
    Names use local or host metadata first, then the offline catalog. GAMES.txt is not an allowlist.
-   Press the left stick (LS), or tap Network, to choose a community. My server is the default; no IP setup.
-4. Public: check Game room visibility is Public (X toggles it); create a room in the game's Local Wireless mode.
-   To join, select a lobby room and press A, then search and join in the game's Local Wireless screen.
-5. Friends codes work on My server / Public community: press Y, then A to create or X to enter a code.
-   Choose the same network, then use Local Wireless in the game. + returns to the game; B cancels or leaves.
-   LAN Play uses in-game Local Wireless rooms, without invite codes or reserved Quick match.
-   Local match means a compatible local candidate, not a confirmed remote game title.
-   Online searches do not include nearby LAN rooms; leave online rooms and select Local only for nearby play.
+   The room lobby combines My server and external networks. Each room shows its source.
+4. Host from the game's Local Wireless menu. New rooms appear in the lobby on My server.
+   The host can set a game password in LANywhere or its overlay and choose Shared or Hidden.
+   Shared shows the password. Hidden keeps the room visible and asks guests to enter the password before joining.
+   Select a room to use its network, then search from the game's Local Wireless menu.
+5. External rooms follow their source network rules. Enter protected My server passwords in the lobby.
+   To play directly with nearby consoles, turn off interception in the overlay.
+
+Tap Join beside any appointment, or press A on the selected one. Join several or tap again to leave.
+Press L to open the game and time picker. Times use your console's time zone.
+Appointments stay in the list for 2 hours after their start time.
+Press Y to mark Ready near the start. Ready lasts 5 minutes. Press X for this appointment’s My server rooms.
+Joined appointments can notify you when a room opens. In-game alerts require Ultrahand with API notifications on.
+Ultrahand download: https://github.com/ppkantorski/Ultrahand-Overlay/releases
 
 See the examples above and GAMES.txt for the full collected Local Wireless candidate list, not confirmed compatibility.
 Games verified in real two-console matches with this plugin: 0.
