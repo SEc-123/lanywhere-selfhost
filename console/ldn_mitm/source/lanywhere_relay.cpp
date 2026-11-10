@@ -6,6 +6,7 @@
  * the GNU General Public License, version 2, as published by the Free Software Foundation.
  */
 #include "lanywhere_relay.hpp"
+#include "appointment_notifier.hpp"
 #include "tcp_stream_proxy.hpp"
 #include "udp_reassembly.hpp"
 #include "udp_fragment_writer.hpp"
@@ -226,6 +227,7 @@ namespace ams::mitm::lanywhere {
         // A card selection is a short-lived intent, separate from the saved network
         // and from the provider of an active room.
         constexpr u64 HostRouteEpoch = UINT64_MAX;
+        constexpr u64 DefaultGameRouteEpoch = HostRouteEpoch - 1;
         constexpr u64 SelectionLifetimeMs = 180'000;
         DiscoveryRoute g_selection{};
         u64 g_selection_until_ms = 0, g_selection_epoch = 0;
@@ -240,7 +242,7 @@ namespace ams::mitm::lanywhere {
         }
 
         void SelectRouteLocked(const DiscoveryRoute &route, const char *code) {
-            do { ++g_selection_epoch; } while (!g_selection_epoch || g_selection_epoch == HostRouteEpoch);
+            do { ++g_selection_epoch; } while (!g_selection_epoch || g_selection_epoch >= DefaultGameRouteEpoch);
             g_selection = route;
             g_selection.selection_epoch = g_selection_epoch;
             util::Strlcpy(g_selection.selected_code, code, sizeof(g_selection.selected_code));
@@ -253,6 +255,10 @@ namespace ams::mitm::lanywhere {
             if (!LoadServer(&server) || server.sin_addr.s_addr != route.ipv4 || server.sin_port != route.port)
                 return false;
             if (route.selection_epoch == HostRouteEpoch) return std::strcmp(route.provider, "self") == 0;
+            if (route.selection_epoch == DefaultGameRouteEpoch) {
+                return !g_selection.selection_epoch && g_public && route.public_enabled &&
+                    !route.selected_game_id && !route.selected_code[0] && std::strcmp(route.provider, "self") == 0;
+            }
             return route.selection_epoch == g_selection.selection_epoch &&
                 route.selected_game_id == g_selection.selected_game_id &&
                 std::memcmp(route.selected_code, g_selection.selected_code, sizeof(route.selected_code)) == 0 &&
@@ -1135,6 +1141,12 @@ namespace ams::mitm::lanywhere {
         out->discovery.ipv4 = server.sin_addr.s_addr;
         out->discovery.port = server.sin_port;
         out->discovery.public_enabled = g_public;
+        if (g_public) {
+            // Games can alternate hosting and searching without a lobby card.
+            // Unselected online searches use the same relay as automatic hosts.
+            util::Strlcpy(out->discovery.provider, "self", sizeof(out->discovery.provider));
+            out->discovery.selection_epoch = DefaultGameRouteEpoch;
+        }
         return true;
     }
 
@@ -1414,19 +1426,44 @@ namespace ams::mitm::lanywhere {
     }
 
     void Publish(const void *network_info, size_t size, u64 host_program_id) {
+        if (size && (size != NetworkInfoSize || !network_info)) return;
+        // The notifier may own its watch lock. Never call it while owning any
+        // relay/lifecycle lock: notifier reads can themselves query room state.
+        const u64 ready = size ? ReadyAppointmentForRoom(le64(static_cast<const u8 *>(network_info))) : 0;
+        bool pushed = false;
         {
             std::scoped_lock lifecycle(g_room_lifecycle_lock);
-            std::scoped_lock lock(g_lock);
-            if (g_state != RelayState::InRoom || g_my_index != 0 ||
-                (size && (size != NetworkInfoSize || !network_info || le64(static_cast<const u8 *>(network_info)) != g_game_id))) return;
-            g_host_program_id = size ? host_program_id : 0;
-            if (!size) {
-                g_metadata_sent = false;
-                g_public_group_sent = false;
+            u64 epoch = 0;
+            u32 token = 0;
+            bool push_capable = false;
+            {
+                std::scoped_lock lock(g_lock);
+                if (g_state != RelayState::InRoom || g_my_index != 0 ||
+                    (size && le64(static_cast<const u8 *>(network_info)) != g_game_id)) return;
+                g_host_program_id = size ? host_program_id : 0;
+                if (!size) {
+                    g_metadata_sent = false;
+                    g_public_group_sent = false;
+                    static_cast<void>(SendFrame(T_Publish, nullptr, 0));
+                    return;
+                }
+                epoch = g_stream_epoch.load(); token = g_token;
+                push_capable = !std::strcmp(g_room_provider, "self") && (g_capabilities & APPOINTMENT_PUSH_CAPABILITY);
             }
-            if (SendFrame(T_Publish, network_info, size) && size) g_public_group_sent = true;
+            // A capable self relay needs host identity before its first publish
+            // triggers a push. Preserve the historical ordering for older peers.
+            if (push_capable) RefreshHostMetadata();
+            std::scoped_lock lock(g_lock);
+            if (g_state != RelayState::InRoom || g_my_index != 0 || g_token != token ||
+                g_stream_epoch.load() != epoch || g_host_program_id != host_program_id ||
+                le64(static_cast<const u8 *>(network_info)) != g_game_id) return;
+            u8 association[8]; put64(association, ready);
+            // Zero is no new association; the server retains a valid binding
+            // for this same game session until withdraw/session replacement.
+            pushed = SendFrame(T_Publish, network_info, size, push_capable ? association : nullptr, push_capable ? sizeof(association) : 0);
+            if (pushed) g_public_group_sent = true;
         }
-        if (size) RefreshHostMetadata();
+        if (pushed) RefreshHostMetadata();
     }
 
     namespace {
@@ -2310,7 +2347,108 @@ namespace ams::mitm::lanywhere {
             received != static_cast<ssize_t>(sizeof(reply))) return;
         const auto *b = reinterpret_cast<const u8 *>(&request);
         const u32 offset = request.op == AppointmentList ? le32(b + 4) : 0;
-        if (ValidAppointmentResponse(reply, offset)) std::memcpy(response, reply, sizeof(*response));
+        if (ValidAppointmentResponse(reply, offset)) {
+            std::memcpy(response, reply, sizeof(*response));
+            // No relay mutex is held while entering the notifier's clock lock.
+            if (response->status == AppointmentOk) SyncAppointmentClock(response->now);
+        }
+    }
+
+    namespace {
+        constexpr int AppointmentPushIoMs = 1500;
+
+        bool ValidPushSubscriptions(const AppointmentPushSubscriptions &subscriptions) {
+            if (subscriptions.count > APPOINTMENT_PUSH_SUBSCRIPTION_LIMIT || subscriptions.reserved) return false;
+            for (size_t i = 0; i < APPOINTMENT_PUSH_SUBSCRIPTION_LIMIT; ++i) {
+                if (i >= subscriptions.count) { if (subscriptions.ids[i]) return false; continue; }
+                if (!subscriptions.ids[i]) return false;
+                for (size_t j = 0; j < i; ++j) if (subscriptions.ids[j] == subscriptions.ids[i]) return false;
+            }
+            return true;
+        }
+
+        bool ValidPushText(char *text, size_t capacity) {
+            const char *end = static_cast<const char *>(std::memchr(text, 0, capacity));
+            if (!end || !std::all_of(end, static_cast<const char *>(text) + capacity, [](char c) { return c == 0; })) return false;
+            return CleanDisplayField(text, capacity, true);
+        }
+
+        bool ValidPushGroup(GroupSummaryV2 *group) {
+            if (group->code[6] || group->code[7] || !ValidCode(group->code) ||
+                !group->game_id || group->game_id == UINT64_MAX || !group->players ||
+                !group->max_players || group->max_players > MaxMembers || group->players > group->max_players ||
+                (group->metadata_flags & ~1u) || group->room_access > RoomAccessHidden ||
+                std::any_of(group->padding, group->padding + sizeof(group->padding), [](u8 v) { return v != 0; })) return false;
+            if (!group->metadata_flags && (group->application_id || group->program_id || group->title_en[0] || group->title_zh[0])) return false;
+            return ValidPushText(group->host, sizeof(group->host)) &&
+                   ValidPushText(group->title_en, sizeof(group->title_en)) && ValidPushText(group->title_zh, sizeof(group->title_zh));
+        }
+    }
+
+    int OpenAppointmentPush(const AppointmentPushSubscriptions &subscriptions, DiscoveryRoute *route) {
+        if (!route) return -1;
+        *route = {};
+        if (!ValidPushSubscriptions(subscriptions)) return -1;
+        DiscoveryRoute captured{};
+        sockaddr_in server{};
+        char provider[33]{};
+        if (!CaptureAppointmentRoute(&captured) || !ResolveDiscoveryRoute(captured, &server, provider)) return -1;
+        const char *error = nullptr;
+        const int fd = ConnectServer(server, &error, AppointmentPushIoMs, "self");
+        if (fd < 0) return -1;
+        u32 caps = 0;
+        if (!QueryCapabilities(fd, &caps, AppointmentPushIoMs) || !AppointmentBackendCurrent(captured)) { ::close(fd); return -1; }
+        if (!(caps & APPOINTMENT_PUSH_CAPABILITY)) { ::close(fd); return -2; }
+        if (!SendFrameTo(fd, APPOINTMENT_PUSH_REQUEST_TYPE, &subscriptions, sizeof(subscriptions), nullptr, 0) ||
+            !AppointmentBackendCurrent(captured)) { ::close(fd); return -1; }
+        *route = captured;
+        return fd;
+    }
+
+    int ReadAppointmentPush(int fd, const DiscoveryRoute &route, AppointmentPushFrame *out, int timeout_ms) {
+        if (!out) return -1;
+        *out = {};
+        if (fd < 0 || timeout_ms < 0 || std::strcmp(route.provider, "self") || !AppointmentBackendCurrent(route)) return -1;
+        // Only an untouched idle stream may report timeout. Once a byte is
+        // available, ReadFrame must complete it within its bounded deadline.
+        const os::Tick start = os::GetSystemTick();
+        pollfd p{fd, POLLIN, 0};
+        int polled;
+        do {
+            const s64 elapsed = (os::GetSystemTick() - start).ToTimeSpan().GetMilliSeconds();
+            const int remaining = static_cast<int>(std::max<s64>(0, timeout_ms - elapsed));
+            polled = ::poll(&p, 1, remaining);
+            if (polled < 0 && errno == EINTR && remaining == 0) return 0;
+        } while (polled < 0 && errno == EINTR);
+        if (!AppointmentBackendCurrent(route)) return -1;
+        if (polled == 0) return 0;
+        if (polled < 0 || (p.revents & (POLLERR | POLLNVAL | POLLHUP)) || !(p.revents & POLLIN)) return -1;
+        u8 type = 0, bytes[sizeof(AppointmentPushFrame)]{};
+        const ssize_t size = ReadFrame(fd, &type, bytes, sizeof(bytes), AppointmentPushIoMs);
+        if (!AppointmentBackendCurrent(route) || size < 0) return -1;
+        if (type == T_Pong) return size == 0 ? 2 : -1;
+        if (type != APPOINTMENT_PUSH_EVENT_TYPE || size != static_cast<ssize_t>(sizeof(bytes))) return -1;
+        const u64 now = le64(bytes), appointment = le64(bytes + 8), delivery = le64(bytes + 16);
+        if (!now || now > UINT64_C(9007199254740991) || (!appointment != !delivery)) return -1;
+        AppointmentPushFrame frame{};
+        frame.now = now; frame.appointment_id = appointment; frame.delivery_id = delivery;
+        if (!appointment) {
+            if (!std::all_of(bytes + 24, bytes + sizeof(bytes), [](u8 v) { return v == 0; })) return -1;
+        } else {
+            std::memcpy(&frame.group, bytes + 24, sizeof(frame.group));
+            if (!ValidPushGroup(&frame.group)) return -1;
+        }
+        *out = frame;
+        return 1;
+    }
+
+    bool PingAppointmentPush(int fd, const DiscoveryRoute &route) {
+        return fd >= 0 && !std::strcmp(route.provider, "self") && AppointmentBackendCurrent(route) &&
+            SendFrameTo(fd, T_Ping, nullptr, 0, nullptr, 0);
+    }
+
+    void CloseAppointmentPush(int fd) {
+        if (fd >= 0) ::close(fd);
     }
 
 

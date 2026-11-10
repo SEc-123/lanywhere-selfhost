@@ -20,11 +20,17 @@ Switch Online — 玩家安装与使用 / Player Guide
 5. 外部房间使用来源服务器的联机规则。需要密码的自有房可在大厅先验证。
    只和附近主机联机时，可以在浮层关闭本地无线接管。
 
+宝可梦「连接交换」等双人搜索从游戏内发起。两台都开启 LANywhere 接管，
+使用本地通信，在游戏内输入相同连接码并开始寻找。双机交换仍待实测。
+
 在首页直接点约局右侧「参加」，或按 A 参加选中的一场。可以参加多场，再点一次即可取消。
 按 L 发起约局，进入选游戏和时间的页面。时间按本机时区显示。
 约局开场后保留 2 小时，到期会从列表消失。
 临近开场可按 Y 准备，状态保留 5 分钟。按 X 查看约局对应的自有网络房间。
-参加后可收同款游戏的开房提醒。游戏内弹窗需使用 Ultrahand 并开启 API 通知。
+参加后可收开房提醒。监听从开场前 30 分钟开始，到开场后 2 小时结束。
+房主在约局中按 Y 准备，再开同款游戏的公开房，可以把房间关联到那一场。
+关联房只提醒那一场。普通公开房按同款游戏匹配。房间开放或腾出空位时会发出提醒。
+启动 Ultrahand 并开启 API 通知后，约局页右侧可查看提醒连接状态。
 Ultrahand 下载：https://github.com/ppkantorski/Ultrahand-Overlay/releases
 
 候选示例 / Candidate examples（有本地无线资料，插件兼容性尚未验证）：
@@ -57,11 +63,18 @@ Requires an already working Atmosphère setup compatible with your console firmw
 5. External rooms follow their source network rules. Enter protected My server passwords in the lobby.
    To play directly with nearby consoles, turn off interception in the overlay.
 
+For in-game pairing such as Pokémon Link Trade, enable interception on both consoles.
+In the game, choose local communication, enter the same link code and start searching.
+Completing a trade on two Switch consoles is still unverified.
+
 Tap Join beside any appointment, or press A on the selected one. Join several or tap again to leave.
 Press L to open the game and time picker. Times use your console's time zone.
 Appointments stay in the list for 2 hours after their start time.
 Press Y to mark Ready near the start. Ready lasts 5 minutes. Press X for this appointment’s My server rooms.
-Joined appointments can notify you when a room opens. In-game alerts require Ultrahand with API notifications on.
+Joined appointments can receive room alerts from 30 minutes before start until 2 hours after.
+Hosts can mark Ready for an appointment before opening a public room for that game to link it.
+Linked rooms alert that appointment. Ordinary public rooms match by game. Alerts are sent when a room opens or frees a seat.
+Start Ultrahand with API notifications enabled and check the alert status on the appointment page.
 Ultrahand download: https://github.com/ppkantorski/Ultrahand-Overlay/releases
 
 See the examples above and GAMES.txt for the full collected Local Wireless candidate list, not confirmed compatibility.

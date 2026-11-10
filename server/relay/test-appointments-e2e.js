@@ -5,13 +5,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { setTimeout: delay } = require('node:timers/promises');
 const fs = require('node:fs/promises');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { ConsolePeer, networkInfo, until } = require('./test-public-e2e');
+const { ConsolePeer, networkInfo, u64, until } = require('./test-public-e2e');
 
-const T_REQUEST = 0x26, T_REPLY = 0xa6;
+const T_REQUEST = 0x26, T_REPLY = 0xa6, T_SUBSCRIBE = 0x29, T_PUSH = 0xa9;
 const ID_A = Buffer.alloc(16, 0x11), ID_B = Buffer.alloc(16, 0x22);
 const GAME = 0x0100000000abc000n, APP = 0x0100abcd12345000n;
 function request(op, client, {offset = 0, id = 0n, start = 0n, game = 0n, app = 0n} = {}) {
@@ -36,14 +37,15 @@ function parse(body) {
     return { status, next, now, rows };
 }
 async function ask(peer, payload) { peer.send(T_REQUEST, payload); return parse(await peer.frame(T_REPLY)); }
-async function boot(state, {upstreamPort, slowRenameMs = 0} = {}) {
+async function boot(state, {upstreamPort, slowRenameMs = 0, clockFile} = {}) {
     let command = path.join(__dirname, 'server.js');
-    if (upstreamPort || slowRenameMs) {
+    if (upstreamPort || slowRenameMs || clockFile) {
         const gateway = path.join(__dirname, 'upstream-gateway.js');
         const target = command; command = path.join(state, 'fixture-wrapper.cjs');
-        const upstream = upstreamPort ? `const g=require(${JSON.stringify(gateway)});g.PUBLIC_PROVIDERS=[{id:'lanywhere-public',host:'127.0.0.1',port:${upstreamPort},maxConnections:8,connectTimeoutMs:3000,adapterMetadata:true,localTransport:true}];` : '';
+        const upstream = upstreamPort ? `const g=require(${JSON.stringify(gateway)});g.PUBLIC_PROVIDERS=[{id:'lanywhere-public',host:'127.0.0.1',port:${upstreamPort},maxConnections:8,connectTimeoutMs:3000,capabilities:4096,adapterMetadata:true,localTransport:true}];` : '';
         const delay = slowRenameMs ? `const fs=require('node:fs');const rename=fs.promises.rename;fs.promises.rename=async (...a)=>{if(a[1].endsWith('/appointments.json'))await new Promise(r=>setTimeout(r,${slowRenameMs}));return rename(...a);};` : '';
-        await fs.writeFile(command, `${upstream}${delay}require(${JSON.stringify(target)});`);
+        const clock = clockFile ? `Date.now=()=>Number(require('node:fs').readFileSync(${JSON.stringify(clockFile)},'utf8'))*1000;` : '';
+        await fs.writeFile(command, `${upstream}${delay}${clock}require(${JSON.stringify(target)});`);
     }
     const child = spawn(process.execPath, [command, '--port', '0'], {
         env: { ...process.env, LANYWHERE_STATE_DIR: state, LANYWHERE_STATS_PORT: '0',
@@ -75,7 +77,7 @@ async function fakeLegacy(t) {
             pending = Buffer.concat([pending, bytes]);
             while (pending.length >= 3 && pending.length >= pending.readUInt16LE() + 2) {
                 const n = pending.readUInt16LE(), type = pending[2]; pending = pending.subarray(n + 2);
-                if (type === T_REQUEST) forwarded++;
+                if (type === T_REQUEST || type === T_SUBSCRIBE) forwarded++;
                 if (type === 0x0b) s.write(Buffer.from([2, 0, 0x85, 4])); // legacy capability fallback
                 if (type === 5) s.write(Buffer.from([1, 0, 0x86]));
             }
@@ -188,6 +190,8 @@ test('external provider returns unavailable without forwarding appointment data'
     t.after(async () => { p.close(); await server.stop(); await fs.rm(state, {recursive: true, force: true}); });
     p.send(0x20, Buffer.from('lanywhere-public')); const selected = await p.frame(0xa0); assert.equal(selected.readUInt32LE(0), 64);
     const result = await ask(p, request(1, ID_A)); assert.equal(result.status, 1); assert.equal(result.rows.length, 0);
+    p.send(T_SUBSCRIBE, subscription([]));
+    assert.equal((await p.frame(0x85))[0], 4, 'external routes cannot subscribe');
     assert.equal(upstream.forwarded(), 0, 'anonymous appointment data stays on self');
 });
 
@@ -235,4 +239,217 @@ test('slow appointment commit leaves relay PING responsive and reports only comm
     const pending = await ask(reader, request(1, ID_A)); assert.equal(pending.rows.length, 0, 'read sees last committed snapshot');
     const done = parse(await writer.frame(T_REPLY)); assert.equal(done.status, 0); assert.equal(done.rows.length, 1);
     const after = await ask(reader, request(1, ID_A)); assert.equal(after.rows.length, 1);
+});
+
+function subscription(ids) {
+    const body = Buffer.alloc(208);
+    body.writeUInt32LE(ids.length);
+    ids.forEach((id, i) => body.writeBigUInt64LE(id, 8 + i * 8));
+    return body;
+}
+
+function pushFrame(body) {
+    assert.equal(body.length, 360);
+    return {
+        time: body.readBigUInt64LE(0), event: body.readBigUInt64LE(8), delivery: body.readBigUInt64LE(16),
+        room: body.toString('ascii', 24, 30), game: body.readBigUInt64LE(32), app: body.readBigUInt64LE(40),
+        players: body[56], capacity: body[57], row: body.subarray(24),
+    };
+}
+
+async function subscribe(client, ids) {
+    client.send(T_SUBSCRIBE, subscription(ids));
+    const ack = pushFrame(await client.frame(T_PUSH));
+    assert(ack.time > 1_500_000_000n);
+    assert.equal(ack.event | ack.delivery, 0n);
+    assert(!ack.row.some(Boolean));
+    return ack;
+}
+
+async function nextPush(client, event, host) {
+    const result = pushFrame(await client.frame(T_PUSH));
+    assert.equal(result.event, event);
+    assert.equal(result.room, host.code);
+    assert.equal(result.game, GAME);
+    assert(result.delivery > 0n);
+    return result;
+}
+
+async function noPush(client, message) {
+    await client.barrier();
+    assert(!client.frames.some(frame => frame.type === T_PUSH), message);
+}
+
+async function updatePassword(host, hidden) {
+    const body = Buffer.alloc(48);
+    body.write(host.code, 0, 6, 'ascii');
+    body[6] = hidden ? 3 : 2;
+    body[7] = hidden ? 1 : 0;
+    body.writeUInt32LE(host.token, 8);
+    body.writeBigUInt64LE(GAME, 16);
+    if (hidden) body[24] = 0x31;
+    host.send(0x27, body);
+    assert.equal((await host.frame(0xa7))[0], 0);
+}
+
+async function announceApp(host, app) {
+    const metadata = Buffer.alloc(272);
+    metadata.writeBigUInt64LE(app, 8);
+    host.send(0x21, metadata);
+    await host.barrier();
+}
+
+test('appointment push binds a real host to one event and reports each open-room generation once', {timeout: 16000}, async t => {
+    const state = await fs.mkdtemp(path.join(os.tmpdir(), 'lanywhere-appointment-push-'));
+    const server = await boot(state), clients = [];
+    t.after(async () => { for (const p of clients) p.close(); await server.stop(); await fs.rm(state, {recursive: true, force: true}); });
+    async function open() { const p = await peer(server.port); clients.push(p); return p; }
+    const [scheduler, watcher, sameGame, wrongApp, host, guest] = await Promise.all(Array.from({length: 6}, open));
+    scheduler.send(0x0b);
+    assert((await scheduler.frame(0x89)).readUInt32LE() & 4096);
+    const start = BigInt(Math.floor(Date.now() / 1000) + 60);
+    const first = (await ask(scheduler, request(2, ID_A, {start, game: GAME, app: APP}))).rows[0];
+    const other = (await ask(scheduler, request(2, ID_A, {start: start + 1n, game: GAME, app: APP}))).rows
+        .find(row => row.start === start + 1n);
+    const mismatch = (await ask(scheduler, request(2, ID_A, {start, game: GAME, app: APP + 1n}))).rows
+        .find(row => row.app === APP + 1n);
+    assert(first && other && mismatch);
+
+    // The dedicated socket can keep itself alive and replace subscriptions, but cannot create a room.
+    await subscribe(watcher, [other.id, first.id]);
+    watcher.send(1, u64(GAME), watcher.nickname());
+    assert.equal((await watcher.frame(0x85))[0], 4);
+    await subscribe(sameGame, [other.id]);
+    await subscribe(wrongApp, [mismatch.id]);
+
+    await host.create(GAME);
+    await announceApp(host, APP);
+    await host.publish(Buffer.concat([networkInfo([host], 2, GAME), u64(first.id)]));
+    const initial = await nextPush(watcher, first.id, host);
+    assert.equal(initial.app, APP);
+    assert.equal(initial.players, 1);
+    assert.equal(initial.capacity, 2);
+    await noPush(sameGame, 'bound room is not offered to another event with the same game');
+    await noPush(wrongApp, 'known app metadata excludes other titles sharing the LCID');
+    await subscribe(watcher, [first.id, other.id]);
+    await noPush(watcher, 'subscription replacement does not duplicate an already delivered room');
+
+    const disconnected = once(watcher.tcp, 'close');
+    watcher.close();
+    await disconnected;
+    const reconnected = await open();
+    await subscribe(reconnected, [first.id, other.id]);
+    assert.equal((await nextPush(reconnected, first.id, host)).delivery, initial.delivery);
+
+    // Occupancy publications, including the unextended legacy form, preserve the binding.
+    await host.publish(networkInfo([host], 2, GAME));
+    await host.publish(Buffer.concat([networkInfo([host], 2, GAME), u64(0n)]));
+    await noPush(reconnected, 'same-session occupancy update does not reopen delivery');
+    await subscribe(sameGame, [other.id]);
+    await noPush(sameGame, 'same-session legacy and zero-suffix publications preserve the binding');
+    assert.equal(await guest.join(host.code, {game: GAME}), 2);
+    guest.send(3);
+    await host.frame(0x83);
+    const reopened = await nextPush(reconnected, first.id, host);
+    assert.notEqual(reopened.delivery, initial.delivery, 'new space has a new delivery ID');
+
+    await updatePassword(host, true);
+    await subscribe(reconnected, [first.id, other.id]);
+    await noPush(reconnected, 'private rooms are excluded');
+    await updatePassword(host, false);
+    const unlocked = await nextPush(reconnected, first.id, host);
+    assert.notEqual(unlocked.delivery, reopened.delivery);
+
+    const reservation = Buffer.alloc(122);
+    reservation.fill(0x42, 0, 16);
+    reservation.writeBigUInt64LE(GAME, 16);
+    reservation.writeUInt32LE(1, 108);
+    reservation[115] = 1;
+    reservation.write(host.code, 116, 'ascii');
+    guest.send(9, reservation);
+    assert.equal((await guest.frame(0x88))[0], 1, 'reservation held the only available space');
+    guest.send(10, reservation.subarray(0, 16));
+    assert.equal((await guest.frame(0x88))[0], 2);
+    const released = await nextPush(reconnected, first.id, host);
+    assert.notEqual(released.delivery, unlocked.delivery, 'releasing a reservation opens a new delivery');
+
+    const nextSession = networkInfo([host], 2, GAME);
+    nextSession[16] = 1;
+    // A confirmed host with different app metadata can still publish normally.
+    await host.publish(Buffer.concat([nextSession, u64(mismatch.id)]));
+    const a = await nextPush(reconnected, first.id, host), b = await nextPush(sameGame, other.id, host);
+    assert.equal(a.delivery, b.delivery, 'unbound same-game fallback shares one stable room delivery');
+    assert.notEqual(a.delivery, released.delivery, 'new session resets its delivery and binding');
+    await noPush(wrongApp, 'ignored invalid binding cannot notify a wrong app');
+    await noPush(reconnected, 'multiple matching events do not duplicate one room on the same socket');
+
+    // The metadata hint can change which events match without opening a new room.
+    await announceApp(host, APP + 1n);
+    const newlyMatched = await nextPush(wrongApp, mismatch.id, host);
+    assert.equal(newlyMatched.delivery, a.delivery);
+    await announceApp(host, APP);
+    await noPush(reconnected, 'metadata updates cannot duplicate a delivery to an already notified subscriber');
+});
+
+test('appointment push opens the authoritative alert window and stops at the expiry boundary', {timeout: 10000}, async t => {
+    const state = await fs.mkdtemp(path.join(os.tmpdir(), 'lanywhere-appointment-window-'));
+    const clockFile = path.join(state, 'clock');
+    const initial = BigInt(Math.floor(Date.now() / 1000));
+    async function setClock(time) {
+        await fs.writeFile(clockFile + '.next', time.toString());
+        await fs.rename(clockFile + '.next', clockFile);
+    }
+    await setClock(initial);
+    const server = await boot(state, {clockFile}), clients = [];
+    t.after(async () => { for (const p of clients) p.close(); await server.stop(); await fs.rm(state, {recursive: true, force: true}); });
+    async function open() { const p = await peer(server.port); clients.push(p); return p; }
+    const [scheduler, watcher, host] = await Promise.all([open(), open(), open()]);
+    const start = initial + 1801n;
+    const event = (await ask(scheduler, request(2, ID_A, {start, game: GAME, app: APP}))).rows[0];
+    await host.create(GAME);
+    await host.publish(networkInfo([host], 3, GAME));
+    assert.equal((await subscribe(watcher, [event.id])).time, initial);
+    await noPush(watcher, 'initial snapshot excludes a room for an appointment before the alert window');
+
+    await setClock(start - 1800n);
+    const opened = await nextPush(watcher, event.id, host);
+    assert.equal(opened.time, start - 1800n, 'push opens at server time without client polling');
+    await setClock(start + 7199n);
+    const reconnect = await open();
+    assert.equal((await subscribe(reconnect, [event.id])).time, start + 7199n);
+    assert.equal((await nextPush(reconnect, event.id, host)).delivery, opened.delivery, 'reconnect snapshot uses existing delivery');
+    await setClock(start + 7200n);
+    assert.equal((await subscribe(reconnect, [event.id])).time, start + 7200n);
+    const fresh = await open();
+    await subscribe(fresh, [event.id]);
+    await noPush(fresh, 'initial snapshot excludes the expired appointment');
+    await host.publish();
+    await host.publish(networkInfo([host], 3, GAME));
+    await delay(100);
+    await noPush(watcher, 'room reopen cannot push an expired appointment');
+    assert.deepEqual((await ask(scheduler, request(1, ID_A))).rows, []);
+});
+
+test('appointment push validates the fixed payload and bounds dedicated sockets per IP', {timeout: 10000}, async t => {
+    const state = await fs.mkdtemp(path.join(os.tmpdir(), 'lanywhere-appointment-push-bound-'));
+    const server = await boot(state), clients = [];
+    t.after(async () => { for (const p of clients) p.close(); await server.stop(); await fs.rm(state, {recursive: true, force: true}); });
+    async function open() { const p = await peer(server.port); clients.push(p); return p; }
+    const bad = await open();
+    const padding = subscription([1n]); padding[24] = 1;
+    const reserved = subscription([]); reserved[4] = 1;
+    for (const body of [Buffer.alloc(200), subscription([0n]), subscription([1n, 1n]), padding, reserved]) {
+        bad.send(T_SUBSCRIBE, body);
+        assert.equal((await bad.frame(0x85))[0], 4);
+    }
+    // The 25th slot permits an independent Ready appointment in addition to the 24 joined ones.
+    await subscribe(bad, Array.from({length: 25}, (_, i) => BigInt(i + 1)));
+    for (let i = 0; i < 3; i++) await subscribe(await open(), []);
+    const extra = await open();
+    extra.send(T_SUBSCRIBE, subscription([]));
+    assert.equal((await extra.frame(0x85))[0], 7);
+    const disconnected = once(bad.tcp, 'close');
+    bad.tcp.end();
+    await disconnected;
+    await subscribe(extra, []);
 });

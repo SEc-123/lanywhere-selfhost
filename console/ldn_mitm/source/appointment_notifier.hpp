@@ -11,5 +11,11 @@ namespace ams::mitm::lanywhere {
     void InitializeAppointmentSubscriptions();
     void GetAppointmentSubscriptions(AppointmentSubscriptions *out);
     u32 SetAppointmentSubscription(const AppointmentWatchRequest &request);
+    void SyncAppointmentClock(u64 server_now);
+    u32 AppointmentAlertState();
+
+    void SetReadyAppointment(const AppointmentWatchRequest &request);
+    void ClearReadyAppointment(u64 id);
+    u64 ReadyAppointmentForRoom(u64 game_id);
 
 }

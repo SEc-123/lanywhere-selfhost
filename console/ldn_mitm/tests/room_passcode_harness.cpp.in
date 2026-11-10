@@ -417,8 +417,9 @@ int main() {
         g_selection_until_ms = SelectionNowMs();
         assert(!CaptureGameRoute(&selected));
         CancelMatch();
-        assert(CaptureGameRoute(&selected) && !selected.discovery.selection_epoch &&
-               std::string(selected.discovery.provider) == "lanplay-nl");
+        assert(CaptureGameRoute(&selected) && selected.discovery.selection_epoch == DefaultGameRouteEpoch &&
+               std::string(selected.discovery.provider) == "self");
+        assert(CaptureDiscoveryRoute(&saved) && std::string(saved.provider) == "lanplay-nl");
         assert(ipc.SelectUnifiedLobbyRoom({42, "ABC234", "self", {}}) == 0);
         assert(CaptureGameRoute(&selected) && std::string(selected.discovery.provider) == "self" &&
                g_match.status.mode == MatchMode::Exact && selected.discovery.selected_game_id == 42);

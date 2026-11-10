@@ -74,7 +74,7 @@ function groupIdentity(info) {
 }
 
 function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, perIpLimit = 8, recentPerIp = 32,
-                  maxWaitingPerGame = 256, roomByCode = () => null, access = () => true }) {
+                  maxWaitingPerGame = 256, roomByCode = () => null, access = () => true, onSeatChange = () => {} }) {
     const tickets = new Map();
     const queueByGame = new Map();
     const holdsByRoom = new Map();
@@ -107,9 +107,12 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
     }
 
     function releaseHold(ticket) {
-        const held = holdsByRoom.get(ticket.room);
-        held?.delete(ticket);
-        if (held?.size === 0) holdsByRoom.delete(ticket.room);
+        const room = ticket.room;
+        const held = holdsByRoom.get(room);
+        if (held?.delete(ticket)) {
+            if (!held.size) holdsByRoom.delete(room);
+            onSeatChange(room);
+        }
         ticket.room = null;
         ticket.identity = null;
     }
@@ -163,6 +166,7 @@ function create({ rooms, capacity, waitMs, holdMs, joinedMs, maxTickets = 4096, 
             ticket.identity = groupIdentity(room.published.info);
             ticket.state = STATUS.ASSIGNED;
             ticket.until = now + holdMs;
+            onSeatChange(room);
         }
     }
 

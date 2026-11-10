@@ -167,10 +167,10 @@ namespace ams::mitm::lanywhere {
                     if (response.rows[i].id == input.id && response.rows[i].followed) ready = &response.rows[i];
                 if (ready) {
                     const AppointmentWatchRequest watch{ready->id, ready->starts_at, ready->game_id, ready->app_id, 1, 0};
-                    static_cast<void>(lanywhere::SetAppointmentWatch(watch, false));
+                    lanywhere::SetReadyAppointment(watch);
                 }
             } else if (response.status == AppointmentOk && input.op == AppointmentUnfollow) {
-                lanywhere::CancelAppointmentReady(input.id);
+                lanywhere::ClearReadyAppointment(input.id);
             }
         }
         std::memcpy(out.GetPointer(), &response, sizeof(response));
@@ -248,6 +248,11 @@ namespace ams::mitm::lanywhere {
 
     Result LanywhereService::SelectUnifiedLobbyRoom(UnifiedRoomRequest request) {
         R_RETURN(lanywhere::SelectUnifiedRoom(request));
+    }
+
+    Result LanywhereService::GetAppointmentAlertState(sf::Out<u32> status) {
+        status.SetValue(lanywhere::AppointmentAlertState());
+        R_SUCCEED();
     }
 
 }

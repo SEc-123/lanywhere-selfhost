@@ -6,6 +6,10 @@ static u32 watch_status=AppointmentOk;
 u32 SetAppointmentWatch(const AppointmentWatchRequest&r,bool explicit_watch){watch_calls++;watch_request=r;watch_explicit=explicit_watch;return watch_status;}
 u64 GetAppointmentWatch(){return watched_id;}
 void CancelAppointmentReady(u64 id){cancel_calls++;cancelled_id=id;}
+void SetReadyAppointment(const AppointmentWatchRequest&r){watch_calls++;watch_request=r;watch_explicit=false;}
+void ClearReadyAppointment(u64 id){cancel_calls++;cancelled_id=id;}
+static u32 alert_state=AppointmentAlertWaiting;
+u32 AppointmentAlertState(){return alert_state;}
 }
 static unsigned subscription_reads = 0, subscription_writes = 0;
 static AppointmentWatchRequest subscription_request{};
@@ -34,6 +38,7 @@ class LanywhereService {public:
  Result GetAppointmentWatch(sf::Out<u64>);
  Result ReadAppointmentSubscriptions(const sf::OutBuffer&);
  Result UpdateAppointmentSubscription(AppointmentWatchRequest,sf::Out<u32>);
+ Result GetAppointmentAlertState(sf::Out<u32>);
 };
 /* ACTUAL_IPC */
 
@@ -88,6 +93,7 @@ int main(){
  unsigned checks=0;LanywhereService service;AppointmentResponse out{};
  {AppointmentRelay relay;config(relay.port,"self");auto req=request();g_state=RelayState::InRoom;std::strcpy(g_error,"existing game status");matched=true;const int enters=enter_calls;
   assert(!service.AppointmentExchange({&req,sizeof(req)},{&out,sizeof(out)}));assert(out.status==AppointmentOk&&out.count==1&&out.now==1800000000ULL&&out.rows[0].starts_at==1800000060ULL&&out.rows[0].app_id==0x01008F6008C5E000ULL);assert(!std::memcmp(&out,relay.payload.data(),sizeof(out)));
+  assert(clock_syncs==1&&clock_sample==1800000000ULL);
   auto injected=req;std::memset(injected.participant,0x65,16);
   assert(relay.queries==1&&relay.seen.size()==sizeof(req)&&!std::memcmp(relay.seen.data(),&injected,sizeof(req)));
   assert(req.participant[0]==7&&req.participant[1]==0&&appointment_random_calls==1);
@@ -214,5 +220,6 @@ int main(){
          std::memcmp(&request, &subscription_request, sizeof(request)) == 0);
   checks += 2;
  }
+ for(u32 state:{0u,1u,2u,3u}){lanywhere::alert_state=state;u32 result=99;assert(service.GetAppointmentAlertState({&result})==0&&result==state);checks++;}
  std::printf("Actual appointment IPC/wire: %u cases passed, exact LE payload/time, self isolation, lifecycle preservation and filtered room pages.\n",checks);
 }

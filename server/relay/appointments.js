@@ -81,7 +81,12 @@ function create({ filename, now = () => Math.floor(Date.now() / 1000) }) {
     let events = [], healthy = true, pending = 0, needsMigration = false;
     const ready = new Map(); // hash -> {id, expires}; never persisted, one event per device
     let readyTimer;
-    try { const loaded = load(filename); events = loaded.events; needsMigration = loaded.migrate; } catch { healthy = false; }
+    let eventsById = new Map();
+    function replaceEvents(next) {
+        events = next;
+        eventsById = new Map(next.map(e => [BigInt(e.id), { starts: Number(e.starts), game: BigInt(e.game), app: BigInt(e.app) }]));
+    }
+    try { const loaded = load(filename); replaceEvents(loaded.events); needsMigration = loaded.migrate; } catch { healthy = false; }
     const startup = needsMigration ? save(filename,events,()=>true).catch(() => { healthy = false; }) : Promise.resolve();
     let tail = startup;
     function sweep(current) { for (const [key, value] of ready) if (value.expires <= current) ready.delete(key); }
@@ -119,7 +124,7 @@ function create({ filename, now = () => Math.floor(Date.now() / 1000) }) {
                 if (live.length >= MAX_EVENTS) return response(STATUS.LIMIT,current);
                 let id; do { id = crypto.randomBytes(8).readBigUInt64LE().toString(); } while (id === '0' || live.some(e => e.id === id));
                 live.push({id, starts:req.starts.toString(), game:req.game.toString(), app:req.app.toString()});
-                try { if (!await save(filename,live,connected)) return null; events = live; }
+                try { if (!await save(filename,live,connected)) return null; replaceEvents(live); }
                 catch { healthy = false; return response(STATUS.STORAGE,current); }
             }
         } else {
@@ -149,6 +154,10 @@ function create({ filename, now = () => Math.floor(Date.now() / 1000) }) {
         tail = operation.catch(() => { healthy = false; return null; }).finally(() => { pending--; });
         return operation.catch(() => response(STATUS.STORAGE, current));
     }
-    return { handle };
+    function activeAppointment(id, current) {
+        const event = eventsById.get(id);
+        return healthy && event && current >= event.starts - READY_BEFORE && current < event.starts + GRACE ? event : null;
+    }
+    return { handle, activeAppointment };
 }
 module.exports = { create, parse, response, validateState: validate, STATUS };

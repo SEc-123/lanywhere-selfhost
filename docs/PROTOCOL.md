@@ -219,13 +219,34 @@ matching appointment.
 
 Switch IPC 13 exchanges appointment frames. IPC 14 lists ordinary self-network public
 rooms for one local communication ID. IPC 15/16 set and read a single console-local alert.
-The alert checks the same room listing over a separate connection and uses the Ultrahand
-notification API. It expires two hours after the start. The legacy single alert is cleared on reboot.
+The legacy single alert is cleared on reboot. Joined and Ready alerts expire two
+hours after the start and use the Ultrahand notification API.
 
 IPC 22 reads locally joined appointment IDs. IPC 23 joins or leaves an appointment
 on this console, up to 24 saved appointments. Joined events can arm room alerts
 across reboots. Listing, creation, and readiness use the configured self-hosted
-endpoint independently of the selected game network.
+endpoint independently of the selected game network. IPC 26 reads the local alert status.
+
+Self capability `4096` supports an appointment alert stream. The client sends
+`0x29` on a dedicated TCP connection with a 208-byte `AppointmentPushSubscriptions`
+body. It can include the 24 saved appointments and a separate Ready watch.
+After subscribing, the connection accepts replacement subscriptions and PING.
+The relay acknowledges with `0xa9` and sends eligible room events, including
+currently joinable rooms when reconnecting.
+
+A `0xa9` body contains the relay time, appointment ID, and delivery ID as three
+little-endian u64 values followed by one 336-byte room summary. Both IDs and
+the room are zero on acknowledgment. The relay uses its own time for the
+reminder window and keeps a delivery ID stable while a room remains joinable.
+A room that becomes joinable again gets a new ID. The device uses relay time
+and its monotonic clock to keep the appointment window independent of the
+console date. Relays without capability `4096` use the existing room lookup.
+
+A capable self relay accepts an optional little-endian appointment ID after the
+ordinary `0x07` room advertisement. LANywhere supplies it for a host that
+marked Ready for a matching appointment. The relay validates the game and
+appointment window. A linked room alerts that appointment. Unlinked public
+rooms are eligible by matching game.
 
 ## Game room access (self network)
 

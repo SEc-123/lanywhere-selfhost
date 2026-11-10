@@ -85,6 +85,11 @@ namespace ams::mitm::lanywhere {
     static_assert(sizeof(GroupSummaryV2) == 336);
     static_assert(offsetof(GroupSummaryV2, room_access) == 35 &&
                   offsetof(GroupSummaryV2, title_en) == 80 && offsetof(GroupSummaryV2, title_zh) == 208);
+    struct AppointmentPushFrame {
+        u64 now, appointment_id, delivery_id;
+        GroupSummaryV2 group;
+    };
+    static_assert(sizeof(AppointmentPushFrame) == 360 && offsetof(AppointmentPushFrame, group) == 24);
     struct UnifiedGroup {
         GroupSummaryV2 group;
         char provider[UNIFIED_LOBBY_PROVIDER_SIZE];
@@ -139,6 +144,12 @@ namespace ams::mitm::lanywhere {
         char selected_code[8];
     };
     bool CaptureDiscoveryRoute(DiscoveryRoute *out);
+    // Dedicated self-backend connection; caller owns/serializes its descriptor.
+    int OpenAppointmentPush(const AppointmentPushSubscriptions &subscriptions, DiscoveryRoute *route);
+    // 1 = event/ACK, 2 = PONG, 0 = no frame started before timeout, -1 = failure.
+    int ReadAppointmentPush(int fd, const DiscoveryRoute &route, AppointmentPushFrame *out, int timeout_ms);
+    bool PingAppointmentPush(int fd, const DiscoveryRoute &route);
+    void CloseAppointmentPush(int fd);
     struct GameRoute { DiscoveryRoute discovery; u64 room_epoch; u32 room_token; char room_code[8]; };
     // Active rooms retain their joined provider even if preferences change.
     bool CaptureGameRoute(GameRoute *out);

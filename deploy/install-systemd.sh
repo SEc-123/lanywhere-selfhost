@@ -47,7 +47,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-relay_files=(server.js stats.js public.js lanplay.js lanplay-fork.js lanplay-fork-tcp.js dashboard.html operations.js traffic-store.js appointments.js matchmaking.js group-page.js unified-lobby.js udp-fragments.js upstream-gateway.js room-metadata.js lanplay-providers.js lanplay-realms.js tcp-stream-protocol.js tcp-streams.js inbound-deadline.js)
+relay_files=(server.js stats.js public.js lanplay.js lanplay-fork.js lanplay-fork-tcp.js dashboard.html operations.js traffic-store.js appointments.js appointment-push.js matchmaking.js group-page.js unified-lobby.js udp-fragments.js upstream-gateway.js room-metadata.js lanplay-providers.js lanplay-realms.js tcp-stream-protocol.js tcp-streams.js inbound-deadline.js)
 ops_files=(healthcheck.cjs validate-config.cjs metrics.cjs smoke-relay.cjs smoke-relay-v2.cjs)
 for file in "${relay_files[@]}"; do
     install -m 0644 "$root/server/relay/$file" "$stage/$file"

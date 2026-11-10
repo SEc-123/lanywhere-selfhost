@@ -128,6 +128,7 @@ try {
     await suite('Native game password IPC and bounded transport', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/room_passcode_test.py']);
     await suite('Unified lobby discovery, source isolation and stable paging', process.execPath, ['--test', 'server/relay/test-unified-lobby.js']);
     await suite('Native appointment IPC and self-network isolation', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/appointments_ipc_test.py']);
+    await suite('Native appointment push with server-generated frames', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/appointment_push_test.py'], { ...process.env, NODE: process.execPath });
     await suite('Public game password relay ownership and lifecycle', process.execPath, ['--test', 'server/relay/test-game-code-e2e.js']);
     await suite('Native open-room alert and Ultrahand payload', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/notifier_behavior_test.py']);
     await suite('Native typed listing failures over loopback', process.env.PYTHON || 'python3', ['-B', 'console/ldn_mitm/tests/list_status_test.py']);

@@ -63,6 +63,83 @@ test('canonical Dying Light separates from Pokemon while shared Scarlet/Violet f
  assert.equal((await service.stats()).now.online,4);
 });
 
+test('Scarlet/Violet-style Local Trade peers can take turns advertising and joining over TCP', { timeout: 15000 }, async t => {
+    const service = await launch(t);
+    const scarlet = await service.open('Scarlet fixture');
+    const violet = await service.open('Violet fixture');
+    const unrelated = await service.open('Other scene fixture');
+    const game = SHARED_POKEMON;
+    const tradeScene = 4;
+    const tradeFilter = filter(game);
+    tradeFilter.writeUInt16LE(tradeScene, 10);
+    tradeFilter.writeUInt32LE(0x21, 92); // LocalCommunicationId and SceneId.
+
+    function advertisement(peers, scene, sessionByte, data) {
+        const info = networkInfo(peers, 2, game);
+        info.writeUInt16LE(scene, 10);
+        info.fill(sessionByte, 16, 32);
+        info.writeUInt16LE(data.length, 0x26a);
+        data.copy(info, 0x26c);
+        return info;
+    }
+
+    async function scan(peer) {
+        peer.send(0x0d, tradeFilter);
+        const page = await peer.frame(0x8a);
+        assert.equal(page.readUInt32LE(), 0xffffffff);
+        assert.equal(page.length, 5 + page[4] * (6 + 0x480));
+        return page;
+    }
+
+    function checkAdvertisement(info, sessionByte, data) {
+        assert.equal(info.readBigUInt64LE(), game);
+        assert.equal(info.readUInt16LE(10), tradeScene);
+        assert.deepEqual(info.subarray(16, 32), Buffer.alloc(16, sessionByte));
+        assert.equal(info.readUInt16LE(0x26a), 132);
+        assert.deepEqual(info.subarray(0x26c, 0x26c + 132), data);
+    }
+
+    await unrelated.create(game);
+    await unrelated.publish(advertisement([unrelated], 7, 0x30, Buffer.alloc(0)));
+    assert.deepEqual((await scarlet.find(game)).map(row => row.code), [unrelated.code]);
+    assert.equal((await scan(scarlet))[4], 0);
+    assert.equal((await scan(violet))[4], 0);
+
+    for (const [host, guest, sessionByte] of [[scarlet, violet, 0x41], [violet, scarlet, 0x42]]) {
+        // Synthetic opaque game data. The relay must return all bytes unchanged.
+        const data = Buffer.from(Array.from({ length: 132 }, (_, index) => (index * 73 + sessionByte) & 255));
+        await host.create(game);
+        await host.publish(advertisement([host], tradeScene, sessionByte, data));
+        const page = await scan(guest);
+        assert.equal(page[4], 1);
+        const code = page.toString('ascii', 5, 11);
+        assert.equal(code, host.code);
+        checkAdvertisement(page.subarray(11), sessionByte, data);
+
+        assert.equal(await guest.join(code, { game }), 2);
+        const guestNode = networkInfo([guest], 2, game).subarray(0x68, 0xa8);
+        guest.relay(host.index, 3, guestNode); // LDN CONNECT.
+        assert.equal((await host.ldn(guest, 3)).readUInt32LE(), guest.ip);
+        const connected = advertisement([host, guest], tradeScene, sessionByte, data);
+        await host.publish(connected);
+        host.relay(guest.index, 4, connected); // LDN SYNC.
+        const synced = await guest.ldn(host, 4);
+        assert.equal(synced[0x67], 2);
+        assert.equal(synced.readUInt32LE(0xa8), guest.ip);
+        checkAdvertisement(synced, sessionByte, data);
+
+        guest.send(3); // LEAVE releases this socket for the next host phase.
+        await guest.barrier();
+        await host.publish(); // Withdraw before closing this transient host session.
+        assert.equal((await scan(guest))[4], 0);
+        host.send(3);
+        await host.barrier();
+        await guest.join(code, { game, error: 1 });
+    }
+
+    assert.equal((await service.stats()).now.rooms, 1, 'only the unrelated scene remains');
+});
+
 test('private CREATE0 survives while raw sentinel SCAN_RESP/SYNC cannot cross the self room',{timeout:12000},async t=>{
  const service=await launch(t),host=await service.open('OwnPrivateHost'),guest=await service.open('OwnPrivateGuest');
  await host.create(0n);await guest.join(host.code,{game:0n});

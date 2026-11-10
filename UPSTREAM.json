@@ -3,7 +3,7 @@
   "repository": "https://github.com/augustocco/lanywhere",
   "commit": "7f2bb47bacc972f9ae11ae9a48e35991d09a9837",
   "license": "GPL-2.0-only",
-  "derived_version": "0.5.4",
+  "derived_version": "0.5.7",
   "submodules": {
     "console/Atmosphere-libs": {
       "repository": "https://github.com/Atmosphere-NX/Atmosphere-libs.git",

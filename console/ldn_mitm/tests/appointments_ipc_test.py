@@ -40,16 +40,21 @@ assert re.search(r'AMS_SF_METHOD_INFO\(C, H, 15, Result, SetAppointmentWatch',se
 assert re.search(r'AMS_SF_METHOD_INFO\(C, H, 16, Result, GetAppointmentWatch',service_header)
 assert re.search(r'AMS_SF_METHOD_INFO\(C, H, 22, Result, ReadAppointmentSubscriptions',service_header)
 assert re.search(r'AMS_SF_METHOD_INFO\(C, H, 23, Result, UpdateAppointmentSubscription',service_header)
+assert re.search(r'AMS_SF_METHOD_INFO\(C, H, 26, Result, GetAppointmentAlertState',service_header)
 assert 'constexpr u32 ProtocolVersion = 5;' in header
 ipc='\n'.join(d.function(service,sig) for sig in ['void UseBootAppointmentParticipant(',
  'Result LanywhereService::AppointmentExchange(', 'Result LanywhereService::ListAppointmentRooms(',
  'Result LanywhereService::SetAppointmentWatch(', 'Result LanywhereService::GetAppointmentWatch(',
- 'Result LanywhereService::ReadAppointmentSubscriptions(', 'Result LanywhereService::UpdateAppointmentSubscription('])
+ 'Result LanywhereService::ReadAppointmentSubscriptions(', 'Result LanywhereService::UpdateAppointmentSubscription(',
+ 'Result LanywhereService::GetAppointmentAlertState('])
 template+='\nusing s32=int32_t;\n#include "appointments.h"\n#include "game_identity_text.h"\n#include "room_passcode.h"\n#include "unified_lobby.h"\n'+records+r'''
 constexpr size_t MaxMembers=8;
 constexpr u32 CapabilityMetadata=64;
 constexpr u8 T_FindMetadataPage=0x22,T_MetadataPage=0xa2;
 static void AddCachedIdentity(GroupSummaryV2&) {}
+static unsigned clock_syncs=0;
+static u64 clock_sample=0;
+void SyncAppointmentClock(u64 now){clock_syncs++;clock_sample=now;}
 '''+native+'\n'+(HERE/'appointments_ipc_harness.cpp.in').read_text().replace('/* ACTUAL_IPC */',ipc)
 with tempfile.TemporaryDirectory(prefix='appointments-native-') as temp:
  temp=Path(temp);cpp=temp/'test.cpp';exe=temp/'test';cpp.write_text(template)

@@ -11,7 +11,12 @@
 #define APPOINTMENT_IPC_GET_WATCH 16
 #define APPOINTMENT_IPC_SUBSCRIPTIONS 22
 #define APPOINTMENT_IPC_SUBSCRIBE 23
+#define APPOINTMENT_IPC_ALERT_STATE 26
 #define APPOINTMENT_SUBSCRIPTION_LIMIT 24
+#define APPOINTMENT_PUSH_SUBSCRIPTION_LIMIT (APPOINTMENT_SUBSCRIPTION_LIMIT + 1)
+#define APPOINTMENT_PUSH_CAPABILITY 4096u
+#define APPOINTMENT_PUSH_REQUEST_TYPE 0x29
+#define APPOINTMENT_PUSH_EVENT_TYPE 0xa9
 #define APPOINTMENT_ALERTS_DISABLED 6  /* IPC 15 only, never a wire status. */
 #define APPOINTMENT_REQUEST_TYPE 0x26
 #define APPOINTMENT_RESPONSE_TYPE 0xa6
@@ -34,6 +39,13 @@ enum AppointmentStatus {
     AppointmentLimit,
     AppointmentNotFound,
     AppointmentStorage
+};
+
+enum AppointmentAlertStatus {
+    AppointmentAlertDisabled,
+    AppointmentAlertWaiting,
+    AppointmentAlertConnected,
+    AppointmentAlertLegacy
 };
 
 /* Integers are little-endian. All reserved bytes must be zero. */
@@ -88,6 +100,13 @@ typedef struct {
     uint64_t ids[APPOINTMENT_SUBSCRIPTION_LIMIT];
 } AppointmentSubscriptions;
 
+/* The extra slot carries a separate temporary Ready watch. */
+typedef struct {
+    uint32_t count;
+    uint32_t reserved;
+    uint64_t ids[APPOINTMENT_PUSH_SUBSCRIPTION_LIMIT];
+} AppointmentPushSubscriptions;
+
 #if defined(__cplusplus)
 static_assert(sizeof(AppointmentRequest) == 56 && offsetof(AppointmentRequest, id) == 24);
 static_assert(sizeof(AppointmentRow) == 40 && offsetof(AppointmentRow, followed) == 36);
@@ -95,6 +114,7 @@ static_assert(sizeof(AppointmentResponse) == 264 && offsetof(AppointmentResponse
 static_assert(sizeof(AppointmentRoomsRequest) == 16);
 static_assert(sizeof(AppointmentWatchRequest) == 40);
 static_assert(sizeof(AppointmentSubscriptions) == 200);
+static_assert(sizeof(AppointmentPushSubscriptions) == 208);
 #else
 _Static_assert(sizeof(AppointmentRequest) == 56 && offsetof(AppointmentRequest, id) == 24, "appointment request");
 _Static_assert(sizeof(AppointmentRow) == 40 && offsetof(AppointmentRow, followed) == 36, "appointment row");
@@ -102,6 +122,7 @@ _Static_assert(sizeof(AppointmentResponse) == 264 && offsetof(AppointmentRespons
 _Static_assert(sizeof(AppointmentRoomsRequest) == 16, "appointment rooms request");
 _Static_assert(sizeof(AppointmentWatchRequest) == 40, "appointment watch request");
 _Static_assert(sizeof(AppointmentSubscriptions) == 200, "appointment subscriptions");
+_Static_assert(sizeof(AppointmentPushSubscriptions) == 208, "appointment push subscriptions");
 #endif
 
 #endif

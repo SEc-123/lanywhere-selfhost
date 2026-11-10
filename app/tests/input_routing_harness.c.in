@@ -276,6 +276,17 @@ int main(void) {
     v=lobby();v.capabilities=0;choose(&v);step(&v,HidNpadButton_A);step(&v,HidNpadButton_B);assert(!v.external_confirm&&calls.select==0&&calls.launch==0);checked();
     v=lobby();v.capabilities=0;choose(&v);launch_ok=false;step(&v,HidNpadButton_A);
     assert(v.external_confirm&&strstr(v.message,"HOME")&&calls.launch==0&&calls.select==0);checked();
+    v=lobby();strcpy(v.config.provider,"lanplay-nl");choose(&v);v.groups[0].game_id=UINT64_MAX;
+    v.selection=lobby_room_id(&v.groups[0]);step(&v,HidNpadButton_A);
+    assert(v.external_confirm&&calls.select_route==1&&selected_route.game_id==UINT64_MAX&&
+           !strcmp(v.pinned.provider,"lanplay-nl")&&!strcmp(selected_route.provider,"lanplay-nl"));checked();
+    step(&v,HidNpadButton_B);assert(calls.cancel==1&&!v.external_confirm&&!v.pinned.game_id);checked();
+    v=lobby();strcpy(v.config.provider,"lanplay-nl");choose(&v);route_result=1;
+    step(&v,HidNpadButton_A);assert(v.external_confirm&&calls.select_route==1&&!v.pinned.provider[0]);
+    step(&v,HidNpadButton_B);assert(!calls.cancel&&!v.external_confirm);checked();
+    v=lobby();strcpy(v.config.provider,"lanplay-nl");choose(&v);route_result=2;
+    step(&v,HidNpadButton_A);assert(!v.external_confirm&&calls.select_route==1&&!v.pinned.code[0]&&
+        !strcmp(v.message,"Could not select that room."));checked();
     v=lobby();step(&v,HidNpadButton_StickL);assert(v.provider_panel&&calls.provider_write==0);checked();
     step(&v,TOUCH_NETWORK_CHOICE|1);assert(!v.provider_panel&&calls.provider_write==1&&!strcmp(v.config.provider,"lanywhere-public")&&v.capabilities==0&&calls.page==1);checked();
     for(int provider=2;provider<LOBBY_PROVIDER_COUNT;provider++){
@@ -286,7 +297,8 @@ int main(void) {
         v=lobby();strcpy(v.config.provider,lobby_provider_id(provider));step(&v,HidNpadButton_Y);step(&v,HidNpadButton_L);
         assert(!v.private_panel&&calls.quick==0);checked();
         v=lobby();strcpy(v.config.provider,lobby_provider_id(provider));choose(&v);step(&v,HidNpadButton_A);
-        assert(v.external_confirm&&calls.select==0&&calls.launch==0);checked();
+        assert(v.external_confirm&&calls.select==0&&calls.select_route==1&&calls.launch==0&&
+               !strcmp(v.pinned.provider,lobby_provider_id(provider)));checked();
     }
     v=lobby();v.provider_panel=true;v.private_panel=true;step(&v,TOUCH_NETWORK_CHOICE|2);
     assert(!v.provider_panel&&!v.private_panel&&!strcmp(v.config.provider,"lanplay-nl"));checked();

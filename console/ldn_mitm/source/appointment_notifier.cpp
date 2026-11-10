@@ -17,7 +17,10 @@ namespace ams::mitm::lanywhere {
         constexpr u32 SubscriptionMagic = 0x53414e4c; // LNAS
         constexpr u32 SubscriptionVersion = 1;
         constexpr u64 MaxScheduleAhead = 7 * 24 * 60 * 60;
+        constexpr u64 ReadyLeaseSeconds = 5 * 60;
         constexpr size_t RecentRooms = 64;
+        constexpr size_t RecentDeliveries = 128;
+        constexpr size_t PendingCapacity = 16;
 
         struct Watch {
             AppointmentWatchRequest event;
@@ -38,6 +41,25 @@ namespace ams::mitm::lanywhere {
         static_assert(sizeof(SavedEvent) == 32);
         static_assert(sizeof(SavedSubscriptions) == 16 + 32 * APPOINTMENT_SUBSCRIPTION_LIMIT);
 
+        struct PendingAlert {
+            GroupSummaryV2 group;
+            u64 appointment_id;
+            u64 received_at;
+        };
+
+        struct PushSession {
+            DiscoveryRoute route{};
+            int fd = -1;
+            u64 generation = 0;
+            u64 retry_at = 0;
+            u64 ping_at = 0;
+            u64 last_frame_at = 0;
+            u64 ack_deadline = 0;
+            u32 retry_delay = 1000;
+            bool acknowledged = false;
+            bool unsupported = false;
+        };
+
         constinit os::SdkMutex g_watch_lock;
         constinit os::SdkConditionVariable g_watch_changed;
         constinit Watch g_watch{}; // Legacy explicit watch or an automatic Ready watch.
@@ -51,15 +73,26 @@ namespace ams::mitm::lanywhere {
         constinit bool g_pending_toast = false;
         constinit u64 g_toast_event = 0;
         constinit os::Tick g_toast_at{};
+        constinit u64 g_relay_time = 0;
+        constinit u64 g_relay_tick = 0;
+        constinit AppointmentWatchRequest g_ready_event{};
+        constinit u64 g_ready_until = 0;
+        constinit u32 g_alert_state = AppointmentAlertWaiting;
+        constinit u64 g_alert_generation = 0;
+        constinit u64 g_seen_delivery[RecentDeliveries]{};
+        constinit size_t g_next_delivery = 0;
+        constinit PendingAlert g_pending_alerts[PendingCapacity]{};
+        constinit size_t g_pending_begin = 0, g_pending_count = 0;
         os::ThreadType g_worker;
         alignas(os::MemoryPageSize) u8 g_worker_stack[0x4000];
 
-        u64 Now() {
-            if (R_FAILED(time::Initialize())) return 0;
-            time::PosixTime now{};
-            const Result result = time::StandardUserSystemClock::GetCurrentTime(&now);
-            static_cast<void>(time::Finalize());
-            return R_SUCCEEDED(result) && now.value > 0 ? static_cast<u64>(now.value) : 0;
+        u64 MonotonicMs() {
+            return static_cast<u64>(os::GetSystemTick().ToTimeSpan().GetMilliSeconds());
+        }
+
+        u64 NowLocked() {
+            const u64 tick = MonotonicMs();
+            return g_relay_time && tick >= g_relay_tick ? g_relay_time + (tick - g_relay_tick) / 1000 : g_relay_time;
         }
 
         bool Chinese() {
@@ -144,6 +177,11 @@ namespace ams::mitm::lanywhere {
 
         bool IsExpired(u64 starts_at, u64 now) {
             return now >= starts_at && now - starts_at >= APPOINTMENT_ACTIVE_SECONDS;
+        }
+
+        bool InAlertWindow(u64 starts_at, u64 now) {
+            return now && !IsExpired(starts_at, now) &&
+                (starts_at <= now || starts_at - now <= APPOINTMENT_EARLY_SECONDS);
         }
 
         bool ValidEvent(u64 id, u64 starts_at, u64 game_id, u64 app_id) {
@@ -283,11 +321,84 @@ namespace ams::mitm::lanywhere {
             return false;
         }
 
+        Watch *FindWatchLocked(u64 id) {
+            const size_t index = SubscriptionIndex(id);
+            if (index < g_subscription_count) return &g_subscriptions[index];
+            return g_watch.event.id == id ? &g_watch : nullptr;
+        }
+
+        void RememberRoom(Watch &watch, const char *code) {
+            std::memcpy(watch.seen[watch.next_seen], code, CodeLength);
+            watch.next_seen = (watch.next_seen + 1) % RecentRooms;
+        }
+
         bool CanNotify(const GroupSummaryV2 &room, const AppointmentWatchRequest &event, const Status &current) {
             const bool different_title = event.app_id && room.application_id && (room.metadata_flags & 1) &&
                 event.app_id != room.application_id;
-            return room.game_id == event.game_id && !different_title && room.players &&
+            return room.game_id == event.game_id && !different_title && room.room_access != RoomAccessHidden && room.players &&
                 room.players < room.max_players && std::memcmp(room.code, current.code, CodeLength) != 0;
+        }
+
+        void DiscardPendingAlert() {
+            g_pending_begin = (g_pending_begin + 1) % PendingCapacity;
+            --g_pending_count;
+        }
+
+        void AcceptPushEvent(const AppointmentPushFrame &frame, u64 generation) {
+            Status current{};
+            GetStatus(&current);
+            std::scoped_lock lock(g_watch_lock);
+            if (generation != g_generation || !frame.appointment_id || !frame.delivery_id) return;
+            Watch *watch = FindWatchLocked(frame.appointment_id);
+            if (!watch || !InAlertWindow(watch->event.starts_at, NowLocked()) ||
+                !CanNotify(frame.group, watch->event, current)) return;
+            if (std::find(g_seen_delivery, g_seen_delivery + RecentDeliveries, frame.delivery_id) !=
+                g_seen_delivery + RecentDeliveries) return;
+            g_seen_delivery[g_next_delivery] = frame.delivery_id;
+            g_next_delivery = (g_next_delivery + 1) % RecentDeliveries;
+            const PendingAlert alert{frame.group, frame.appointment_id, MonotonicMs()};
+            for (size_t i = 0; i < g_pending_count; ++i) {
+                auto &pending = g_pending_alerts[(g_pending_begin + i) % PendingCapacity];
+                if (pending.group.game_id == frame.group.game_id &&
+                    std::memcmp(pending.group.code, frame.group.code, CodeLength) == 0) {
+                    pending = alert;
+                    return;
+                }
+            }
+            if (g_pending_count == PendingCapacity) DiscardPendingAlert();
+            g_pending_alerts[(g_pending_begin + g_pending_count++) % PendingCapacity] = alert;
+        }
+
+        void ServicePendingAlerts() {
+            {
+                std::scoped_lock lock(g_watch_lock);
+                if (g_pending_toast &&
+                    (os::GetSystemTick() - g_toast_at).ToTimeSpan() >= TimeSpan::FromSeconds(30))
+                    ClearPendingToast();
+                if (!g_pending_count) return;
+            }
+            if (!ToastAvailable()) return;
+            Status current{};
+            GetStatus(&current);
+            std::scoped_lock lock(g_watch_lock);
+            fs::DirectoryEntryType type;
+            if (R_SUCCEEDED(fs::GetEntryType(&type, NotificationPath))) return;
+            while (g_pending_count) {
+                const auto &pending = g_pending_alerts[g_pending_begin];
+                Watch *watch = FindWatchLocked(pending.appointment_id);
+                if (!watch || MonotonicMs() - pending.received_at >= 90000 ||
+                    !InAlertWindow(watch->event.starts_at, NowLocked()) ||
+                    !CanNotify(pending.group, watch->event, current)) {
+                    DiscardPendingAlert();
+                    continue;
+                }
+                if (QueueToast(pending.group)) {
+                    g_toast_event = pending.appointment_id;
+                    RememberRoom(*watch, pending.group.code);
+                    DiscardPendingAlert();
+                }
+                return;
+            }
         }
 
         void Poll(const AppointmentWatchRequest &event, u64 generation, size_t slot = 0) {
@@ -319,12 +430,10 @@ namespace ams::mitm::lanywhere {
                     const auto &room = rooms[i];
                     if (!CanNotify(room, event, current) || HasSeenRoom(event, room.code)) continue;
 
-                    const u64 now = Now();
-                    if (!now || IsExpired(event.starts_at, now)) return;
+                    if (!InAlertWindow(event.starts_at, NowLocked())) return;
                     if (QueueToast(room)) {
                         g_toast_event = event.id;
-                        std::memcpy(watch.seen[watch.next_seen], room.code, CodeLength);
-                        watch.next_seen = (watch.next_seen + 1) % RecentRooms;
+                        RememberRoom(watch, room.code);
                     }
                     return;
                 }
@@ -333,71 +442,221 @@ namespace ams::mitm::lanywhere {
             }
         }
 
+        void WaitForChange(u64 generation, TimeSpan delay) {
+            std::scoped_lock lock(g_watch_lock);
+            if (generation == g_generation) g_watch_changed.TimedWait(g_watch_lock, delay);
+        }
+
+        void ReportAlertState(u64 generation, u32 state) {
+            std::scoped_lock lock(g_watch_lock);
+            if (generation != g_generation) return;
+            g_alert_generation = generation;
+            g_alert_state = state;
+        }
+
+        void SampleLegacyClock() {
+            AppointmentRequest request{};
+            request.op = AppointmentList;
+            os::GenerateRandomBytes(request.participant, sizeof(request.participant));
+            if (std::all_of(request.participant, request.participant + sizeof(request.participant),
+                            [](u8 value) { return value == 0; }))
+                request.participant[0] = 1;
+            AppointmentResponse response{};
+            ExchangeAppointment(request, &response);
+            if (response.status == AppointmentOk) SyncAppointmentClock(response.now);
+        }
+
+        void LegacyIteration(u64 generation) {
+            AppointmentWatchRequest event{};
+            size_t slot = 0;
+            u64 wait = 5;
+            {
+                std::scoped_lock lock(g_watch_lock);
+                if (generation != g_generation) return;
+                const u64 now = NowLocked();
+                if (now) {
+                    wait = 30;
+                    const size_t slots = g_subscription_count + 1;
+                    size_t active = 0;
+                    for (size_t n = 0; n < slots; ++n) {
+                        const size_t candidate = (g_next_poll + n) % slots;
+                        const auto &scheduled = PollSlot(candidate).event;
+                        if (!scheduled.id || IsExpired(scheduled.starts_at, now) ||
+                            (!candidate && SubscriptionIndex(scheduled.id) < g_subscription_count)) continue;
+                        const u64 until = scheduled.starts_at > now ? scheduled.starts_at - now : 0;
+                        if (until > APPOINTMENT_EARLY_SECONDS) {
+                            wait = std::min(wait, until - APPOINTMENT_EARLY_SECONDS);
+                            continue;
+                        }
+                        if (!active++) {
+                            slot = candidate;
+                            event = scheduled;
+                        }
+                    }
+                    if (active) {
+                        g_next_poll = (slot + 1) % slots;
+                        wait = active > 1 ? 1 : 5;
+                    }
+                }
+            }
+            if (event.id) Poll(event, generation, slot);
+            WaitForChange(generation, TimeSpan::FromSeconds(wait));
+        }
+
+        void DisconnectPush(PushSession &session) {
+            if (session.fd >= 0) CloseAppointmentPush(session.fd);
+            session.fd = -1;
+            session.acknowledged = false;
+        }
+
+        void RetryPush(PushSession &session) {
+            DisconnectPush(session);
+            session.retry_at = MonotonicMs() + session.retry_delay;
+            session.retry_delay = std::min<u32>(30000, session.retry_delay * 2);
+            ReportAlertState(session.generation, AppointmentAlertWaiting);
+        }
+
+        // False means the relay explicitly lacks streaming support.
+        bool StepPush(PushSession &session, const AppointmentPushSubscriptions &subscriptions, u64 generation) {
+            const u64 now = MonotonicMs();
+            if (session.generation != generation) {
+                DisconnectPush(session);
+                session.generation = generation;
+                if (!session.unsupported) {
+                    session.retry_at = 0;
+                    session.retry_delay = 1000;
+                }
+            }
+            if (session.unsupported && now < session.retry_at) {
+                ReportAlertState(generation, AppointmentAlertLegacy);
+                return false;
+            }
+            if (session.fd < 0) {
+                if (now < session.retry_at) {
+                    WaitForChange(generation, TimeSpan::FromMilliSeconds(std::min<u64>(1000, session.retry_at - now)));
+                    return true;
+                }
+                session.fd = OpenAppointmentPush(subscriptions, &session.route);
+                session.unsupported = session.fd == -2;
+                if (session.unsupported) {
+                    session.retry_at = MonotonicMs() + 30000;
+                    ReportAlertState(generation, AppointmentAlertLegacy);
+                    SampleLegacyClock();
+                    return false;
+                }
+                if (session.fd < 0) {
+                    RetryPush(session);
+                    return true;
+                }
+                session.last_frame_at = MonotonicMs();
+                session.ping_at = session.last_frame_at + 8000;
+                session.ack_deadline = session.last_frame_at + 10000;
+                ReportAlertState(generation, AppointmentAlertWaiting);
+                return true;
+            }
+            if ((!session.acknowledged && now >= session.ack_deadline) || now - session.last_frame_at >= 20000) {
+                RetryPush(session);
+                return true;
+            }
+            if (now >= session.ping_at) {
+                if (!PingAppointmentPush(session.fd, session.route)) {
+                    RetryPush(session);
+                    return true;
+                }
+                session.ping_at = now + 8000;
+            }
+            AppointmentPushFrame frame{};
+            const int received = ReadAppointmentPush(session.fd, session.route, &frame, 1000);
+            if (received < 0) {
+                RetryPush(session);
+                return true;
+            }
+            if (received > 0) session.last_frame_at = MonotonicMs();
+            if (received == 1) {
+                SyncAppointmentClock(frame.now);
+                if (!frame.appointment_id && !frame.delivery_id) {
+                    session.acknowledged = true;
+                    session.retry_delay = 1000;
+                    ReportAlertState(generation, AppointmentAlertConnected);
+                } else if (session.acknowledged) {
+                    AcceptPushEvent(frame, generation);
+                }
+            }
+            return true;
+        }
+
+        void WorkerIteration(PushSession &session) {
+            AppointmentPushSubscriptions subscriptions{};
+            u64 generation;
+            {
+                std::scoped_lock lock(g_watch_lock);
+                const u64 now = NowLocked();
+                if (now) {
+                    if (g_watch.event.id && IsExpired(g_watch.event.starts_at, now)) ClearWatch();
+                    PruneSubscriptionsLocked(now);
+                }
+                for (size_t i = 0; i < g_subscription_count; ++i)
+                    subscriptions.ids[subscriptions.count++] = g_subscriptions[i].event.id;
+                if (g_watch.event.id && SubscriptionIndex(g_watch.event.id) == g_subscription_count)
+                    subscriptions.ids[subscriptions.count++] = g_watch.event.id;
+                generation = g_generation;
+            }
+            if (!subscriptions.count) {
+                DisconnectPush(session);
+                session = {};
+                std::scoped_lock lock(g_watch_lock);
+                if (generation == g_generation) {
+                    g_pending_begin = g_pending_count = 0;
+                    g_alert_state = AppointmentAlertWaiting;
+                    g_watch_changed.Wait(g_watch_lock);
+                }
+                return;
+            }
+            ServicePendingAlerts();
+            if (!StepPush(session, subscriptions, generation)) LegacyIteration(generation);
+        }
+
         void Worker(void *) {
             // Retire a file left behind by a reboot or interrupted SD write.
             static_cast<void>(fs::DeleteFile(NotificationPath));
             static_cast<void>(fs::DeleteFile(TemporaryPath));
-            for (;;) {
-                AppointmentWatchRequest event{};
-                u64 generation;
-                size_t slot = 0;
-                s64 delay = 5;
-                {
-                    std::scoped_lock lock(g_watch_lock);
-                    while (!g_watch.event.id && !g_subscription_count) g_watch_changed.Wait(g_watch_lock);
-
-                    const u64 now = Now();
-                    if (now) {
-                        if (g_watch.event.id && IsExpired(g_watch.event.starts_at, now)) ClearWatch();
-                        PruneSubscriptionsLocked(now);
-                        if (!g_watch.event.id && !g_subscription_count) continue;
-
-                        const size_t slots = g_subscription_count + 1;
-                        size_t active = 0;
-                        u64 wait = 30;
-                        for (size_t n = 0; n < slots; ++n) {
-                            const size_t candidate = (g_next_poll + n) % slots;
-                            const auto &scheduled = PollSlot(candidate).event;
-                            if (!scheduled.id || (!candidate && SubscriptionIndex(scheduled.id) < g_subscription_count))
-                                continue;
-                            const u64 until = scheduled.starts_at > now ? scheduled.starts_at - now : 0;
-                            if (until > APPOINTMENT_EARLY_SECONDS) {
-                                wait = std::min(wait, until - APPOINTMENT_EARLY_SECONDS);
-                                continue;
-                            }
-                            if (!active) {
-                                slot = candidate;
-                                event = scheduled;
-                            }
-                            ++active;
-                        }
-                        if (active) {
-                            g_next_poll = (slot + 1) % slots;
-                            delay = active > 1 ? 1 : 5;
-                        } else {
-                            delay = static_cast<s64>(wait);
-                        }
-                    }
-                    if (g_pending_toast &&
-                        (os::GetSystemTick() - g_toast_at).ToTimeSpan() >= TimeSpan::FromSeconds(30))
-                        ClearPendingToast();
-                    generation = g_generation;
-                }
-                if (event.id) Poll(event, generation, slot);
-                std::scoped_lock lock(g_watch_lock);
-                if (generation == g_generation)
-                    g_watch_changed.TimedWait(g_watch_lock, TimeSpan::FromSeconds(delay));
-            }
+            PushSession session{};
+            for (;;) WorkerIteration(session);
         }
 
         bool StartWorkerLocked() {
             if (g_worker_started) return true;
-            if (R_FAILED(os::CreateThread(&g_worker, Worker, nullptr, g_worker_stack, sizeof(g_worker_stack), 42)))
+            if (R_FAILED(os::CreateThread(&g_worker, Worker, nullptr, g_worker_stack, sizeof(g_worker_stack), os::DefaultThreadPriority)))
                 return false;
             os::StartThread(&g_worker);
             g_worker_started = true;
             return true;
         }
+
+        void AssignWatchLocked(const AppointmentWatchRequest &request, bool explicit_watch) {
+            if (SameEvent(g_watch.event, request)) {
+                g_watch.explicit_watch |= explicit_watch;
+            } else {
+                ClearWatch();
+                g_watch.event = request;
+                g_watch.explicit_watch = explicit_watch;
+            }
+            g_watch_changed.Signal();
+        }
+    }
+
+    void SyncAppointmentClock(u64 server_now) {
+        if (!server_now) return;
+        std::scoped_lock lock(g_watch_lock);
+        if (server_now <= NowLocked()) return;
+        g_relay_time = server_now;
+        g_relay_tick = MonotonicMs();
+    }
+
+    u32 AppointmentAlertState() {
+        if (!ToastAvailable()) return AppointmentAlertDisabled;
+        std::scoped_lock lock(g_watch_lock);
+        return g_alert_generation == g_generation ? g_alert_state : static_cast<u32>(AppointmentAlertWaiting);
     }
 
     u32 SetAppointmentWatch(const AppointmentWatchRequest &request, bool explicit_watch) {
@@ -411,19 +670,10 @@ namespace ams::mitm::lanywhere {
             return AppointmentOk;
         }
         if (!ToastAvailable()) return APPOINTMENT_ALERTS_DISABLED;
-        const u64 now = Now();
-        if (!now) return AppointmentUnavailable;
-        if (!ValidWindow(request, now)) return AppointmentInvalid;
         std::scoped_lock lock(g_watch_lock);
+        if (!ValidWindow(request, NowLocked())) return AppointmentInvalid;
         if (!StartWorkerLocked()) return AppointmentUnavailable;
-        if (SameEvent(g_watch.event, request)) {
-            g_watch.explicit_watch |= explicit_watch;
-        } else {
-            ClearWatch();
-            g_watch.event = request;
-            g_watch.explicit_watch = explicit_watch;
-        }
-        g_watch_changed.Signal();
+        AssignWatchLocked(request, explicit_watch);
         return AppointmentOk;
     }
 
@@ -432,12 +682,36 @@ namespace ams::mitm::lanywhere {
         return g_watch.event.id;
     }
 
-    void CancelAppointmentReady(u64 id) {
+    void SetReadyAppointment(const AppointmentWatchRequest &request) {
         std::scoped_lock lock(g_watch_lock);
+        const u64 now = NowLocked();
+        if (!ValidWindow(request, now) || !InAlertWindow(request.starts_at, now)) return;
+        g_ready_event = request;
+        g_ready_until = now + ReadyLeaseSeconds;
+        if (StartWorkerLocked()) AssignWatchLocked(request, false);
+    }
+
+    void ClearReadyAppointment(u64 id) {
+        std::scoped_lock lock(g_watch_lock);
+        if (g_ready_event.id == id) {
+            g_ready_event = {};
+            g_ready_until = 0;
+        }
         if (g_watch.event.id == id && !g_watch.explicit_watch) {
             ClearWatch();
             g_watch_changed.Signal();
         }
+    }
+
+    void CancelAppointmentReady(u64 id) {
+        ClearReadyAppointment(id);
+    }
+
+    u64 ReadyAppointmentForRoom(u64 game_id) {
+        std::scoped_lock lock(g_watch_lock);
+        const u64 now = NowLocked();
+        return g_ready_event.id && game_id == g_ready_event.game_id &&
+            now < g_ready_until && InAlertWindow(g_ready_event.starts_at, now) ? g_ready_event.id : 0;
     }
 
     void InitializeAppointmentSubscriptions() {
@@ -450,7 +724,7 @@ namespace ams::mitm::lanywhere {
         *out = {};
         std::scoped_lock lock(g_watch_lock);
         if (!LoadSubscriptionsLocked()) return;
-        PruneSubscriptionsLocked(Now());
+        PruneSubscriptionsLocked(NowLocked());
         if (g_subscription_count) static_cast<void>(StartWorkerLocked());
         out->count = static_cast<u32>(g_subscription_count);
         for (size_t i = 0; i < g_subscription_count; ++i)
@@ -459,9 +733,9 @@ namespace ams::mitm::lanywhere {
 
     u32 SetAppointmentSubscription(const AppointmentWatchRequest &request) {
         if (!request.id || request.enabled > 1 || request.reserved) return AppointmentInvalid;
-        const u64 now = Now();
-        if (request.enabled && !ValidWindow(request, now)) return AppointmentInvalid;
         std::scoped_lock lock(g_watch_lock);
+        const u64 now = NowLocked();
+        if (request.enabled && !ValidWindow(request, now)) return AppointmentInvalid;
         if (!LoadSubscriptionsLocked()) return AppointmentStorage;
         PruneSubscriptionsLocked(now);
         const size_t index = SubscriptionIndex(request.id);

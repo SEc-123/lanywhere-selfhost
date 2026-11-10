@@ -96,6 +96,9 @@ static const char *tr_error(const char *es)
         { "CAPS no válido", "invalid capability request" },
         { "FIND_PAGE no válido", "invalid room page request" },
         { "demasiadas búsquedas", "too many searches" },
+        { "suscripción no válida", "invalid alert subscription" },
+        { "demasiadas suscripciones", "too many alert subscriptions; try again shortly" },
+        { "la conexión de suscripción es de solo lectura", "the alert connection is read-only" },
         { "filtro de búsqueda no válido", "invalid search filter" },
         { "PING no válido", "invalid ping request" },
         { "el destinatario necesita actualizar el transporte UDP", "a player needs an updated UDP transport" },
@@ -1750,19 +1753,30 @@ static void start_quick(View *v)
 
 static void select_room(View *v)
 {
-    const bool routed = v->selection.provider[0] != '\0';
-    const bool reserved = routed ? strcmp(v->selection.provider, "self") == 0 : supports_reserved(v);
+    LobbyRoomId selection = v->selection;
+    const bool legacy_external = !selection.provider[0] &&
+        v->discovery == LobbyDiscoveryLegacy && !is_self_network(v);
+    if (legacy_external)
+        snprintf(selection.provider, sizeof(selection.provider), "%s", v->config.provider);
+    const bool routed = selection.provider[0] != '\0';
+    const bool reserved = routed ? strcmp(selection.provider, "self") == 0 : supports_reserved(v);
     if (routed || reserved) {
-        Result result = routed ? lanywhere_select_unified(v->selection) : lanywhere_select(v->selection.code);
-        if (routed && v->appointment_game_id && is_self_network(v) && unified_ipc_missing(result))
-            result = lanywhere_select(v->selection.code);
+        Result result = routed ? lanywhere_select_unified(selection) : lanywhere_select(selection.code);
+        if (routed && unified_ipc_missing(result)) {
+            if (legacy_external) {
+                selection = v->selection;
+                result = 0;
+            } else if (v->appointment_game_id && is_self_network(v)) {
+                result = lanywhere_select(selection.code);
+            }
+        }
         if (R_FAILED(result)) {
             snprintf(v->message, sizeof(v->message), "%s", TR("No se pudo seleccionar la sala.", "Could not select that room."));
             poll_lanywhere(v);
             return;
         }
     }
-    v->pinned = v->selection;
+    v->pinned = selection;
     if (v->sel >= 0 && v->sel < v->count) v->pinned_group = v->groups[v->sel];
     v->selection = (LobbyRoomId){0};
     v->sel = -1;
@@ -1774,7 +1788,7 @@ static void select_room(View *v)
             TR("Abre el juego desde HOME y busca la sala; no está reservada.", "Open the game from HOME and search; this room is not reserved.");
         snprintf(v->message, sizeof(v->message), "%s", hint);
     }
-    if (routed || reserved) poll_lanywhere(v);
+    if (selection.provider[0] || reserved) poll_lanywhere(v);
 }
 
 static bool open_selected_game(View *v)

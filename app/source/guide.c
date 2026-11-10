@@ -14,6 +14,11 @@ static const GuidePage pages_zh[] = {
         "打开对应游戏，进入“本地无线”。",
         "搜索房间，按游戏提示加入。"
     }, "受保护的房间先在大厅验证。游戏若再要求，输入相同密码。" },
+    { "游戏内配对", {
+        "两台都开启 LANywhere 的本地无线接管。",
+        "在游戏里选本地通信，输入相同连接码。",
+        "两台都在游戏里开始寻找。"
+    }, "适用于宝可梦连接交换等游戏内双人搜索。" },
     { "游戏密码", {
         "“在大厅分享”会让选房的玩家看到密码。",
         "“隐藏密码”需要玩家向房主获取密码。",
@@ -23,7 +28,7 @@ static const GuidePage pages_zh[] = {
         "打开应用即进入约局。大厅按十字键左可返回。",
         "选中约局按 A 加入或退出。按 L 发起新约局。",
         "开场前 30 分钟起按 Y 准备，临近开场按 X 找房。"
-    }, "约局开场后保留 2 小时。游戏内提醒需要 Ultrahand 通知。" },
+    }, "加入可收开房提醒。房主按 Y 准备后开房可关联约局。" },
     { "连不上", {
         "确认联网，尽量使用相同游戏版本。",
         "使用“本地无线”，别选游戏的官方在线模式。",
@@ -41,6 +46,11 @@ static const GuidePage pages_en[] = {
         "Open the matching game and enter Local Wireless.",
         "Search for rooms and follow the game's prompts."
     }, "Unlock protected rooms in the lobby. Enter the same password in game if asked." },
+    { "Pair in game", {
+        "Enable LANywhere interception on both consoles.",
+        "Choose local communication and enter the same link code.",
+        "Start searching from the game on both consoles."
+    }, "For in-game pairing such as Pokémon Link Trade." },
     { "Game passwords", {
         "Share in lobby lets players see the password.",
         "Keep password hidden: players ask the host for it.",
@@ -50,7 +60,7 @@ static const GuidePage pages_en[] = {
         "The app opens in Appointments. D-pad Left reopens it.",
         "A to join or leave a selected appointment. L to create.",
         "Y for Ready from 30 min before. X to find rooms."
-    }, "Appointments stay for 2 hours after start. In-game alerts require Ultrahand." },
+    }, "Join for room alerts. Hosts can mark Ready before opening a room to link it." },
     { "Cannot connect?", {
         "Check internet. Use the same game version where possible.",
         "Choose Local Wireless in the game's menu.",

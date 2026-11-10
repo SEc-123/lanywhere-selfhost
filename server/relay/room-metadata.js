@@ -55,6 +55,10 @@ function create({ now = Date.now } = {}) {
         const header = Buffer.alloc(5); header.writeUInt32LE(next); header[4] = rooms.length;
         return Buffer.concat([header, ...rooms.map(room => summary(room, describeAccess?.(room)))]);
     }
-    return { set, summary, page };
+    function applicationId(room) {
+        const entry = entries.get(room);
+        return entry && entry.owner === room.members[0] ? entry.applicationId : 0n;
+    }
+    return { set, summary, page, applicationId };
 }
 module.exports = { create, parse, PAYLOAD_BYTES, RECORD_BYTES };

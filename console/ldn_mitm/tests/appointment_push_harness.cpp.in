@@ -1,0 +1,64 @@
+static void config(u16 port,const char*provider="self"){
+ std::scoped_lock lock(g_lock);fs::denied=fs::fail_size=fs::short_read=false;
+ fs::files[ConfigPath]=std::make_shared<fs::Data>(fs::Data{"server=127.0.0.1\nport="+std::to_string(port)+"\nnetwork="+provider+"\npublic=1\napodo=Tester\n"});
+}
+static std::vector<u8> load(const char*path){FILE*f=std::fopen(path,"rb");assert(f);std::vector<u8>b(360);assert(std::fread(b.data(),1,b.size(),f)==b.size()&&std::fgetc(f)==EOF);std::fclose(f);return b;}
+static bool allzero(const AppointmentPushFrame&f){const u8*p=reinterpret_cast<const u8*>(&f);return std::all_of(p,p+sizeof(f),[](u8 c){return c==0;});}
+static bool writeAll(int fd,const u8*p,size_t size){while(size){
+#ifdef MSG_NOSIGNAL
+ const int flags=MSG_NOSIGNAL;
+#else
+ const int flags=0;
+#endif
+ const ssize_t n=::send(fd,p,size,flags);if(n<=0)return false;p+=n;size-=n;}return true;}
+static void respond(int fd,u8 type,const std::vector<u8>&body){std::vector<u8>b(3+body.size());put16(b.data(),body.size()+1);b[2]=type;if(body.size())std::memcpy(b.data()+3,body.data(),body.size());writeAll(fd,b.data(),b.size());}
+static bool receive(int fd,u8&type,std::vector<u8>&body){u8 h[3];size_t got=0;while(got<3){ssize_t n=::recv(fd,h+got,3-got,0);if(n<=0)return false;got+=n;}if(le16(h)<1)return false;type=h[2];body.resize(le16(h)-1);got=0;while(got<body.size()){ssize_t n=::recv(fd,body.data()+got,body.size()-got,0);if(n<=0)return false;got+=n;}return true;}
+class Peer {
+ int listener;std::thread thread;std::atomic<bool>stop{false};
+ public:u16 port;std::atomic<unsigned>opens{0},subscriptions{0},pings{0};
+ Peer(std::vector<std::vector<u8>> frames={},int mode=0,u32 caps=APPOINTMENT_PUSH_CAPABILITY):listener(::socket(AF_INET,SOCK_STREAM,0)){
+  assert(listener>=0);sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);assert(!::bind(listener,(sockaddr*)&a,sizeof(a)));assert(!::listen(listener,2));socklen_t n=sizeof(a);assert(!::getsockname(listener,(sockaddr*)&a,&n));port=ntohs(a.sin_port);
+  thread=std::thread([this,frames,mode,caps]{while(!stop){pollfd p{listener,POLLIN,0};if(::poll(&p,1,50)<=0)continue;int fd=::accept(listener,nullptr,nullptr);if(fd<0)continue;opens++;
+#ifdef SO_NOSIGPIPE
+   int one=1;::setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));
+#endif
+   timeval timeout{2,0};::setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));u8 type;std::vector<u8>b;
+   while(receive(fd,type,b)){
+    if(type==T_Caps){if(mode==3)respond(fd,T_Error,{4});else if(mode==4)respond(fd,T_Error,{7});else{std::vector<u8>reply(4);put32(reply.data(),caps);respond(fd,T_CapsReply,reply);}}
+    else if(type==APPOINTMENT_PUSH_REQUEST_TYPE){assert(b.size()==208&&le32(b.data())==1&&le64(b.data()+8)==7);subscriptions++;
+     if(mode==1){const u8 partial[]={0x69};writeAll(fd,partial,sizeof(partial));}
+     else for(const auto&f:frames)respond(fd,mode==2?T_Error:APPOINTMENT_PUSH_EVENT_TYPE,f);
+    }else if(type==T_Ping){assert(b.empty());pings++;respond(fd,T_Pong,{});}
+    else assert(false && "push must not select provider, create/join/leave game rooms");
+   }::close(fd);
+  }});
+ }
+ ~Peer(){stop=true;::shutdown(listener,SHUT_RDWR);::close(listener);thread.join();}
+};
+int main(int argc,char**argv){
+ assert(argc==3);const auto ack=load(argv[1]),event=load(argv[2]);unsigned checks=0;AppointmentPushSubscriptions subs{};subs.count=1;subs.ids[0]=7;
+ {
+  Peer peer({ack,event});config(peer.port,"lanplay-nl");DiscoveryRoute route{};AppointmentPushFrame out{};
+  g_state=RelayState::InRoom;std::strcpy(g_error,"existing room state");int fd=OpenAppointmentPush(subs,&route);assert(fd>=0&&!std::strcmp(route.provider,"self"));
+  assert(ReadAppointmentPush(fd,route,&out,1000)==1&&out.now==1800000000ULL&&!out.appointment_id&&!out.delivery_id);
+  assert(ReadAppointmentPush(fd,route,&out,1000)==1&&out.appointment_id==7&&out.delivery_id&&out.group.game_id==42&&out.group.players==1&&out.group.max_players==4&&out.group.metadata_flags==1);
+  assert(!std::strcmp(out.group.title_en,"Pokémon Violet")&&!std::strcmp(out.group.title_zh,"宝可梦 紫"));
+  assert(ReadAppointmentPush(fd,route,&out,5)==0&&allzero(out));assert(PingAppointmentPush(fd,route));assert(ReadAppointmentPush(fd,route,&out,1000)==2&&allzero(out));
+  assert(g_state==RelayState::InRoom&&!std::strcmp(g_error,"existing room state"));CloseAppointmentPush(fd);checks+=5;
+ }
+ for(int mode:{0,3,4}){Peer peer({},mode,0);config(peer.port);DiscoveryRoute route{};assert(OpenAppointmentPush(subs,&route)==(mode==4?-1:-2)&&!peer.subscriptions);checks++;}
+ for(int bad=0;bad<5;bad++){Peer peer;config(peer.port);auto invalid=subs;if(bad==0)invalid.count=26;if(bad==1)invalid.reserved=1;if(bad==2)invalid.ids[0]=0;if(bad==3)invalid.ids[2]=8;if(bad==4){invalid.count=2;invalid.ids[1]=7;}
+  DiscoveryRoute route{};assert(OpenAppointmentPush(invalid,&route)==-1&&!peer.opens);checks++;}
+ for(int bad=0;bad<18;bad++){auto b=event;switch(bad){
+  case 0:b.resize(359);break;case 1:b.resize(361);break;case 2:put64(b.data(),0);break;case 3:put64(b.data()+8,0);break;
+  case 4:put64(b.data()+16,0);break;case 5:b[24+6]=1;break;case 6:put64(b.data()+24+8,UINT64_MAX);break;
+  case 7:b[24+32]=0;break;case 8:b[24+33]=9;break;case 9:b[24+34]=2;break;case 10:b[24+35]=3;break;case 11:b[24+36]=1;break;
+  case 12:std::memset(b.data()+24+40,'A',40);break;case 13:b[24+40+5]=1;break;case 14:b[24+80]=0xc0;b[24+81]=0xaf;break;
+  case 15:b[24+80]=0xe2;b[24+81]=0x80;b[24+82]=0xae;break;case 16:b[24+34]=0;break;case 17:put64(b.data()+8,0);put64(b.data()+16,0);break;}
+  Peer peer({b});config(peer.port);DiscoveryRoute route{};int fd=OpenAppointmentPush(subs,&route);assert(fd>=0);AppointmentPushFrame out{};assert(ReadAppointmentPush(fd,route,&out,1000)==-1&&allzero(out));CloseAppointmentPush(fd);checks++;
+ }
+ {Peer peer({std::vector<u8>{4}},2);config(peer.port);DiscoveryRoute route{};int fd=OpenAppointmentPush(subs,&route);assert(fd>=0);AppointmentPushFrame out{};assert(ReadAppointmentPush(fd,route,&out,1000)==-1);CloseAppointmentPush(fd);checks++;}
+ {Peer peer({},1);config(peer.port);DiscoveryRoute route{};int fd=OpenAppointmentPush(subs,&route);assert(fd>=0);AppointmentPushFrame out{};auto began=std::chrono::steady_clock::now();assert(ReadAppointmentPush(fd,route,&out,1000)==-1&&allzero(out));assert(std::chrono::steady_clock::now()-began<std::chrono::seconds(3));CloseAppointmentPush(fd);checks++;}
+ {Peer peer({ack}),replacement;config(peer.port);DiscoveryRoute route{};int fd=OpenAppointmentPush(subs,&route);assert(fd>=0);config(replacement.port);AppointmentPushFrame out{};assert(ReadAppointmentPush(fd,route,&out,10)==-1&&!PingAppointmentPush(fd,route)&&!replacement.opens);CloseAppointmentPush(fd);checks++;}
+ std::printf("Actual native push transport: %u checks passed; real server ACK/event, strict malformed rows/frames, partial timeout, PONG, self route and legacy fallback.\n",checks);
+}

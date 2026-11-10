@@ -33,7 +33,7 @@ typedef struct {
 typedef struct {
     AppointmentResponse exchange;
     AppointmentSubscriptions subscriptions;
-    u32 subscription_status;
+    u32 subscription_status, alert_status;
     bool subscriptions_ok;
 } PendingReply;
 
@@ -45,6 +45,7 @@ static unsigned g_epoch, g_request_epoch;
 static bool g_worker, g_busy;
 static AppointmentSubscriptions g_subscriptions;
 static bool g_subscriptions_ok;
+static u32 g_alert_status = UINT32_MAX;
 static AppointmentResponse g_page;
 static u32 g_offset;
 static u64 g_selected, g_touched, g_rendered[APPOINTMENT_PAGE_SIZE];
@@ -97,6 +98,7 @@ void appointments_open(bool worker_available, bool resume)
         g_page = (AppointmentResponse){.next = APPOINTMENT_END};
         g_subscriptions = (AppointmentSubscriptions){0};
         g_subscriptions_ok = false;
+        g_alert_status = UINT32_MAX;
     }
     atomic_store(&g_active, true);
     awake();
@@ -175,6 +177,9 @@ bool appointments_worker_exchange(Service *service)
         .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
         .buffers = { { &reply.subscriptions, sizeof(reply.subscriptions) } });
     reply.subscriptions_ok = R_SUCCEEDED(subscriptions_result) && subscriptions_valid(&reply.subscriptions);
+    u32 alert_status = UINT32_MAX;
+    const Result alert_result = serviceDispatchOut(service, APPOINTMENT_IPC_ALERT_STATE, alert_status);
+    reply.alert_status = R_SUCCEEDED(alert_result) && alert_status <= AppointmentAlertLegacy ? alert_status : UINT32_MAX;
     mutexLock(&g_lock);
     g_reply = reply;
     g_completed = true;
@@ -236,6 +241,7 @@ bool appointments_tick(u64 monotonic_ms)
         g_busy = false;
         if (epoch == g_epoch && appointments_active()) {
             g_subscriptions_ok = result.subscriptions_ok;
+            g_alert_status = result.alert_status;
             if (result.subscriptions_ok) g_subscriptions = result.subscriptions;
             if (operation.subscription.id) {
                 if (result.subscription_status == AppointmentOk)
@@ -496,6 +502,17 @@ static void card(int i, bool selected)
     gfx_round_rect(ListX, y, ListW, RowH, 12, selected ? BG : PANEL);
 }
 
+static const char *appointment_alert_text(u32 status)
+{
+    switch (status) {
+    case AppointmentAlertDisabled: return "Start Ultrahand with API notifications.";
+    case AppointmentAlertWaiting: return "Room alerts waiting.";
+    case AppointmentAlertConnected: return "Room alerts connected.";
+    case AppointmentAlertLegacy: return "Room alerts using periodic checks.";
+    default: return NULL;
+    }
+}
+
 static void draw_list(const GameCatalog *catalog, AppointmentTouchZone touch)
 {
     g_selection_expired = false;
@@ -564,6 +581,11 @@ static void draw_list(const GameCatalog *catalog, AppointmentTouchZone touch)
     }
     if (server_now() && !g_busy)
         action(SideX, ListY + 190, "L", "New appointment", HidNpadButton_L, touch);
+    const bool watching = (g_subscriptions_ok && g_subscriptions.count) ||
+        (i >= 0 && g_page.rows[i].followed);
+    const char *alert = watching ? appointment_alert_text(g_alert_status) :
+        (i >= 0 && g_subscriptions_ok ? "Join to get room alerts." : NULL);
+    if (alert) gfx_text_fit(SideX, ListY + 247, 19, MUTED, ui_text(alert), SideW);
     if (g_offset)
         action(ListX + 444, 127, "ZL", "Prev", HidNpadButton_ZL, touch);
     if (g_page.next != APPOINTMENT_END)

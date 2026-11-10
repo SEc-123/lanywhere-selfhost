@@ -42,7 +42,8 @@
     AMS_SF_METHOD_INFO(C, H, 22, Result, ReadAppointmentSubscriptions, (const ams::sf::OutBuffer &out), (out)) \
     AMS_SF_METHOD_INFO(C, H, 23, Result, UpdateAppointmentSubscription, (AppointmentWatchRequest request, ams::sf::Out<u32> status), (request, status)) \
     AMS_SF_METHOD_INFO(C, H, 24, Result, ListUnifiedRooms, (UnifiedRoomsRequest request, ams::sf::Out<UnifiedPage> page, const ams::sf::OutBuffer &out), (request, page, out)) \
-    AMS_SF_METHOD_INFO(C, H, 25, Result, SelectUnifiedLobbyRoom, (UnifiedRoomRequest request), (request))
+    AMS_SF_METHOD_INFO(C, H, 25, Result, SelectUnifiedLobbyRoom, (UnifiedRoomRequest request), (request)) \
+    AMS_SF_METHOD_INFO(C, H, 26, Result, GetAppointmentAlertState, (ams::sf::Out<u32> status), (status))
 
 AMS_SF_DEFINE_INTERFACE(ams::mitm::lanywhere, ILanywhereService, AMS_ILANYWHERE_SERVICE, 0x594E414C)
 
@@ -76,6 +77,7 @@ namespace ams::mitm::lanywhere {
             Result UpdateAppointmentSubscription(AppointmentWatchRequest request, sf::Out<u32> status);
             Result ListUnifiedRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out);
             Result SelectUnifiedLobbyRoom(UnifiedRoomRequest request);
+            Result GetAppointmentAlertState(sf::Out<u32> status);
     };
     static_assert(IsILanywhereService<LanywhereService>);
 

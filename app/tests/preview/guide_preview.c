@@ -45,7 +45,7 @@ int main(int argc, char **argv)
         free(inventory);
     }
     const int pages = guide_page_count();
-    assert(pages == 5);
+    assert(pages == 6);
     for (int p = 0; p < pages; p++) {
         assert(guide_touch_action(60, 680, p) == (p ? HidNpadButton_ZL : 0));
         assert(guide_touch_action(900, 680, p) == (p + 1 < pages ? HidNpadButton_ZR : 0));

@@ -21,7 +21,7 @@ static AppointmentWatchRequest last_subscription;
 static AppointmentSubscriptions subscriptions;
 static unsigned exchanges, subscription_updates;
 static bool disconnect, bad_subscriptions;
-static u32 subscription_result;
+static u32 subscription_result, alert_status;
 static const char *expected[8];
 
 Result mock_appointment_dispatch_in_out(Service *service, unsigned command, const void *request, size_t size,
@@ -46,6 +46,13 @@ Result mock_appointment_dispatch_in_out(Service *service, unsigned command, cons
             subscriptions.ids[index] = subscriptions.ids[index + 1];
         subscriptions.ids[--subscriptions.count] = 0;
     }
+    return 0;
+}
+
+Result mock_appointment_dispatch_out(Service *service, unsigned command, void *output, size_t size)
+{
+    assert(service && command == APPOINTMENT_IPC_ALERT_STATE && size == sizeof(alert_status));
+    memcpy(output, &alert_status, size);
     return 0;
 }
 
@@ -238,6 +245,8 @@ int main(void)
     exchange(0);
     assert(last_subscription.id == 1 && last_subscription.enabled && subscriptions.count == 1);
     check_draw("Appointments", "Leave appointment", "Appointment joined.");
+    check_draw("Appointments", "Leave appointment", "Start Ultrahand with API notifications.");
+    alert_status = AppointmentAlertConnected;
 
     // The other row joins directly without moving the controller selection.
     const u64 second_tap = join_taps[1];
@@ -245,6 +254,7 @@ int main(void)
     assert(press(second_tap) == AppointmentStay);
     exchange(0);
     assert(last_subscription.id == 2 && last_subscription.enabled && subscriptions.count == 2);
+    check_draw("Appointments", "Leave appointment", "Room alerts connected.");
     assert(!page.rows[0].interested && !page.rows[1].interested);
     check_draw("Appointments", "Leave appointment", "Ready opens 30 min before.");
     assert(join_taps[0] & APPOINTMENT_TOUCH_JOINED);

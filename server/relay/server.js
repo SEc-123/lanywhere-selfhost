@@ -32,6 +32,7 @@ const { groupPage } = require('./group-page');
 const { create: createUnifiedLobby } = require('./unified-lobby');
 const trafficStore = require('./traffic-store');
 const appointmentStore = require('./appointments');
+const pushProtocol = require('./appointment-push');
 const upstreamGateway = require('./upstream-gateway');
 const roomMetadata = require('./room-metadata').create();
 const streamProtocol = require('./tcp-stream-protocol');
@@ -77,7 +78,7 @@ const UDP_FEATURES = 4 | 8;
 const SELF_CAPABILITIES = 3 | UDP_FEATURES | 16 | 32 | 64 | streamProtocol.CAPABILITY |
     ((LANPLAY_PORT || process.env.LANYWHERE_LANPLAY_REALM) ? streamProtocol.LEGACY_CAPABILITY : 0) |
     (process.env.LANYWHERE_LANPLAY_REALM ? 0 : upstreamGateway.ROOM_PASSCODE_CAPABILITY |
-        upstreamGateway.ROOM_ACCESS_CAPABILITY | upstreamGateway.UNIFIED_LOBBY_CAPABILITY);
+        upstreamGateway.ROOM_ACCESS_CAPABILITY | upstreamGateway.UNIFIED_LOBBY_CAPABILITY | pushProtocol.CAPABILITY);
 const IDLE_MS = 20000;
 const GRACE_MS = envInt('LANYWHERE_GRACE_MS', 60000, 1, 300000);
 const MATCH_WAIT_MS = envInt('LANYWHERE_MATCH_WAIT_MS', 90000, 1, 300000);
@@ -113,7 +114,7 @@ const LIMITS = {
     dataPackets: envInt('LANYWHERE_DATA_PACKETS_PER_SEC', 1000, 1, 10000),
     roomsTotal: 3000,
     perMinute: { create: envInt('LANYWHERE_CREATE_PER_MIN', 10, 1, 1000), join: 30, find: 120, match: 600,
-        appointments: 120, gameCode: 120, gameAuth: 12, unifiedLobby: 120 },
+        appointments: 120, appointmentSubscribe: 30, gameCode: 120, gameAuth: 12, unifiedLobby: 120 },
 };
 const STATE_FILE = path.join(process.env.LANYWHERE_STATE_DIR ?? __dirname, 'traffic.json');
 if (process.env.LANYWHERE_STATE_DIR === '') throw new Error('LANYWHERE_STATE_DIR no puede estar vacío');
@@ -187,8 +188,17 @@ const upstreams = upstreamGateway.create({
 });
 const matches = matchmaking.create({ rooms: () => rooms.values(), capacity: nativeMatchCapacity,
     roomByCode: code => rooms.get(code), access: matchGameAccess,
+    onSeatChange: room => appointmentPush?.roomChanged(room),
     waitMs: MATCH_WAIT_MS, holdMs: MATCH_HOLD_MS, joinedMs: Math.max(GRACE_MS, MATCH_HOLD_MS) });
 setInterval(matches.sweep, 250).unref();
+const appointmentPush = realmId ? null : pushProtocol.create({
+    rooms: () => rooms.values(),
+    isEligible: room => listedSelfGameRoom(room) && isOpen(room) && nativeMatchCapacity(room) > 0,
+    applicationId: roomMetadata.applicationId,
+    summarize: room => roomMetadata.summary(room, describeGameAccess(room)),
+    activeAppointment: appointments.activeAppointment,
+    send,
+});
 const unifiedLobby = realmId ? null : createUnifiedLobby({
     providerIds: upstreams.lobbyProviders(), queryProvider: upstreams.queryLobby,
     selfRows: () => [...rooms.values()].filter(listedSelfGameRoom)
@@ -320,6 +330,7 @@ function checkMonth() {
     }
     const wasPaused = paused;
     paused = traffic.bytes >= CAP_BYTES;
+    if (paused !== wasPaused) appointmentPush?.rescan();
     if (paused && !wasPaused) {
         matches.drain();
         streams.shutdown();
@@ -551,6 +562,7 @@ function exchangeGameCode(socket, body) {
         publication.gameAccess = length ? { shared: Buffer.from(passcode) } : undefined;
         if (previous?.hash) matches.roomChanged(room, true);
     }
+    appointmentPush?.roomChanged(room);
     return replyGameCode(socket, status.OK);
 }
 
@@ -596,6 +608,7 @@ function resumeMember(socket, old, ip) {
     socket.member = old;
     sendRoom(old);
     matches.roomChanged(old.room);
+    appointmentPush?.roomChanged(old.room);
     stats.count('resumes');
     log(`sala ${old.room.code}: vuelve ${old.nick} (${ipStr(old.ip)})`);
 }
@@ -624,6 +637,7 @@ function detach(member) {
     clearTimeout(member.grace);
     member.grace = setTimeout(() => leave(member, 'no volvió'), GRACE_MS);
     matches.roomChanged(member.room);
+    appointmentPush?.roomChanged(member.room);
     log(`sala ${member.room.code}: se cortó ${member.nick}, se guarda su puesto`);
     checkShutdown();
 }
@@ -659,6 +673,7 @@ function leave(member, why) {
         }
     }
     matches.roomChanged(room);
+    appointmentPush?.roomChanged(room);
     checkShutdown();
 }
 
@@ -705,6 +720,20 @@ function relayControl(member, body) {
 }
 
 function onFrame(socket, type, body) {
+    if (type === pushProtocol.SUBSCRIBE) {
+        if (!appointmentPush || !upstreams.isSelf(socket) || socket.member)
+            return sendError(socket, E.BAD_REQUEST, 'suscripción no válida');
+        if (paused) return sendError(socket, E.PAUSED, PAUSED_TEXT);
+        const ids = pushProtocol.parse(body);
+        if (!ids) return sendError(socket, E.BAD_REQUEST, 'suscripción no válida');
+        const ip = plainIp(socket.remoteAddress);
+        if (draining || !allowed(ip, 'appointmentSubscribe') || !appointmentPush.subscribe(socket, ip, ids))
+            return sendError(socket, E.BUSY, 'demasiadas suscripciones');
+        upstreams.handleFrame(socket, type, body);
+        return;
+    }
+    if (appointmentPush?.has(socket) && type !== T.PING)
+        return sendError(socket, E.BAD_REQUEST, 'la conexión de suscripción es de solo lectura');
     if (type === T.UNIFIED_LOBBY) {
         if (!unifiedLobby || !upstreams.isSelf(socket) || body.length !== 8)
             return sendError(socket, E.BAD_REQUEST, 'FIND_PAGE no válido');
@@ -777,7 +806,7 @@ function onFrame(socket, type, body) {
                 if (member && member !== claim.member) return sendError(socket, E.BAD_REQUEST, 'ya estás en una sala');
                 if (claim.member) return resumeMember(socket, claim.member, ip);
                 const joined = join(socket, room, nick(body.subarray(6, 38)), (seat) => matches.commit(claim.ticket, seat, version), features);
-                if (joined) matches.roomChanged(room);
+                if (joined) { matches.roomChanged(room); appointmentPush?.roomChanged(room); }
                 return;
             }
             if (room.gameId) {
@@ -790,7 +819,7 @@ function onFrame(socket, type, body) {
                 if (!existingEmulatedStation && !hasSeat(room)) return sendError(socket, E.FULL, 'la sala está llena');
             }
             const joined = join(socket, room, nick(body.subarray(6, 38)), undefined, features);
-            if (joined) matches.roomChanged(room);
+            if (joined) { matches.roomChanged(room); appointmentPush?.roomChanged(room); }
             return;
         }
         case T.RESUME: {
@@ -816,12 +845,15 @@ function onFrame(socket, type, body) {
             if (body.length === 0) {
                 room.published = null;
             } else {
-                if (body.length !== NETWORK_INFO_SIZE) return sendError(socket, E.BAD_REQUEST, 'grupo no válido');
+                const extended = appointmentPush && !socket.virtual && body.length === NETWORK_INFO_SIZE + 8;
+                if (body.length !== NETWORK_INFO_SIZE && !extended)
+                    return sendError(socket, E.BAD_REQUEST, 'grupo no válido');
                 if (rejectUnresolvedLcid(socket, body.readBigUInt64LE(0))) return;
-                const connected = networkMembers(member, body);
+                const network = body.subarray(0, NETWORK_INFO_SIZE);
+                const connected = networkMembers(member, network);
                 if (!connected) return sendError(socket, E.BAD_REQUEST, 'grupo no válido');
                 const previous = room.published;
-                const info = sanitizeNetworkInfo(room, body);
+                const info = sanitizeNetworkInfo(room, network);
                 const sameSession = previous?.member === member &&
                     previous.info.subarray(SESSION_ID_START, SESSION_ID_END).equals(info.subarray(SESSION_ID_START, SESSION_ID_END));
                 let gameAccess = sameSession ? previous.gameAccess : undefined;
@@ -829,7 +861,15 @@ function onFrame(socket, type, body) {
                     gameAccess = { hash: gameAccess.hash, grants: new Map() };
                 else if (!gameAccess?.hash && info[ACCEPT_POLICY] === ALWAYS_REJECT)
                     gameAccess = undefined;
-                room.published = { member, info, lcid: room.gameId, connected, gameAccess };
+                let appointmentId = sameSession ? previous.appointmentId : 0n;
+                if (!appointmentId && extended) {
+                    const requested = body.readBigUInt64LE(NETWORK_INFO_SIZE);
+                    const event = appointments.activeAppointment(requested, Math.floor(Date.now() / 1000));
+                    const app = roomMetadata.applicationId(room);
+                    if (event?.game === room.gameId && (!app || !event.app || app === event.app))
+                        appointmentId = requested;
+                }
+                room.published = { member, info, lcid: room.gameId, connected, gameAccess, appointmentId };
                 for (const station of connected) {
                     clearTimeout(station.admission);
                     station.admission = null;
@@ -838,6 +878,7 @@ function onFrame(socket, type, body) {
                 if (!previous) log(`sala ${room.code}: grupo publicado (juego ${room.gameId.toString(16)})`);
             }
             matches.roomChanged(room);
+            appointmentPush?.roomChanged(room);
             return;
         }
         case T.FIND: {
@@ -891,6 +932,7 @@ function onFrame(socket, type, body) {
             const result = roomMetadata.set(member, body);
             if (result.error === 'rate') return sendError(socket, E.BUSY, 'demasiadas actualizaciones del nombre del juego');
             if (result.error) return sendError(socket, E.BAD_REQUEST, 'metadatos del anfitrión no válidos');
+            appointmentPush?.roomChanged(member.room);
             return;
         }
         case T.FIND_META_PAGE: {
@@ -994,6 +1036,7 @@ const tcp = net.createServer((socket) => {
         const n = (connections.get(ip) || 1) - 1;
         if (n > 0) connections.set(ip, n); else connections.delete(ip);
         if (socket.member) detach(socket.member);
+        appointmentPush?.close(socket);
         upstreams.onClose(socket);
         checkShutdown();
     });
@@ -1180,6 +1223,7 @@ function beginDrain() {
     draining = true;
     matches.drain();
     unifiedLobby?.shutdown();
+    appointmentPush?.shutdown();
     log('cerrando: no se aceptan nuevas salas ni uniones');
 }
 
