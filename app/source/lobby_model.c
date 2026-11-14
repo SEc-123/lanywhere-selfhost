@@ -108,7 +108,8 @@ LobbyRoomId lobby_room_id_on(const LobbyGroup *group, const char *provider)
         size_t size = 0;
         while (size < sizeof(id.provider) && provider[size]) ++size;
         if (size == sizeof(id.provider) ||
-            (lobby_provider_index(provider) < 0 && strcmp(provider, REGION_PROVIDER_EU) != 0))
+            (lobby_provider_index(provider) < 0 && strcmp(provider, REGION_PROVIDER_EU) != 0 &&
+             strcmp(provider, REGION_PROVIDER_COMMUNITY) != 0))
             return (LobbyRoomId){0};
         memcpy(id.provider, provider, size);
     }
@@ -156,7 +157,9 @@ bool lobby_unified_page_valid(UnifiedPage page, UnifiedRoomsRequest request,
     for (int32_t i = 0; i < page.count; i++) {
         const LobbyUnifiedGroup *row = &rows[i];
         if (!row->provider[0] || !lobby_room_id_on(&row->group, row->provider).game_id ||
-            (!regional && strcmp(row->provider, REGION_PROVIDER_EU) == 0))
+            (!regional && (strcmp(row->provider, REGION_PROVIDER_EU) == 0 ||
+                           strcmp(row->provider, REGION_PROVIDER_COMMUNITY) == 0)) ||
+            (strcmp(row->provider, REGION_PROVIDER_COMMUNITY) == 0 && row->group.room_access != RoomAccessNone))
             return false;
         for (size_t j = 0; j < sizeof(row->reserved); ++j)
             if (row->reserved[j]) return false;

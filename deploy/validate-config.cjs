@@ -12,6 +12,7 @@ const { parseEndpoint } = require(fs.existsSync(path.join(__dirname, 'regional-d
 const integerRanges = new Map([
     ['LANYWHERE_LANPLAY_PORT', [0, 65535]],
     ['LANYWHERE_ENABLE_PUBLIC_UPSTREAM', [0, 1]],
+    ['LANYWHERE_ENABLE_COMMUNITY_DIRECT', [0, 1]],
     ['LANYWHERE_ENABLE_LANPLAY_UPSTREAM', [0, 1]],
     ['LANYWHERE_MAX_CONNECTIONS', [1, 16000]],
     ['LANYWHERE_MAX_CONNECTIONS_PER_IP', [1, 1024]],
@@ -70,6 +71,9 @@ function validateConfig(source, { localAddresses = Object.values(os.networkInter
     const total = Number(settings.get('LANYWHERE_MAX_CONNECTIONS') || 1024);
     const perIp = Number(settings.get('LANYWHERE_MAX_CONNECTIONS_PER_IP') || 12);
     if (perIp > total) throw new Error('The per-IP connection limit exceeds the total connection limit');
+    if (Number(settings.get('LANYWHERE_ENABLE_COMMUNITY_DIRECT')) === 1 &&
+        Number(settings.get('LANYWHERE_ENABLE_PUBLIC_UPSTREAM')) !== 1)
+        throw new Error('Community direct requires LANYWHERE_ENABLE_PUBLIC_UPSTREAM=1');
 }
 
 if (require.main === module) {

@@ -22,6 +22,7 @@ fixture=r'''
 #include <vector>
 #include <netinet/in.h>
 #include "transport_recovery.hpp"
+#include "regional_relay.h"
 using u8=uint8_t;using u16=uint16_t;using u32=uint32_t;using u64=uint64_t;using s64=int64_t;
 using namespace ams::mitm::lanywhere;
 static s64 now_ms;static int mode,attempts,installs,closed,sends,close_transport;static std::vector<int>budgets;static std::vector<s64>sleeps;
@@ -76,6 +77,12 @@ int main(){
  assert(Reconnect()==RecoveryResult::Resumed&&attempts==1&&installs==1&&config_reads==0);
  assert(g_server.sin_addr.s_addr==expected_server.sin_addr.s_addr&&g_server.sin_port==expected_server.sin_port);
  std::puts("PASS regional reconnect: captured Europe/self endpoint survives a different configured default, no config reread");
+ reset(1);g_server.sin_addr.s_addr=0x0200007f;g_server.sin_port=htons(11461);
+ std::strcpy(g_room_provider,REGION_PROVIDER_COMMUNITY);
+ expected_server=g_server;std::strcpy(expected_provider,REGION_PROVIDER_COMMUNITY);
+ assert(Reconnect()==RecoveryResult::Resumed&&attempts==3&&installs==1&&config_reads==0);
+ assert(!std::strcmp(g_room_provider,REGION_PROVIDER_COMMUNITY));
+ std::puts("PASS community reconnect: keeps captured node/provider despite another configured server");
  reset(1);assert(Reconnect()==RecoveryResult::Resumed);assert(attempts==3&&installs==1&&close_transport==1&&!g_recovering&&!g_error[0]);assert(now_ms==3300&&g_last_keepalive.ms==3300&&g_my_ip==0x0a0d0203&&g_token==42);Status view{};GetStatus(&view);assert(view.state==RelayState::InRoom&&!view.error[0]);s64 total=0;for(auto n:sleeps)total+=n;assert(total==3000);
  for(int busy:{20,21}){reset(busy);assert(Reconnect()==RecoveryResult::Resumed&&attempts==3&&now_ms==10100&&installs==1);}
  reset(2);assert(Reconnect()==RecoveryResult::Expired&&attempts==1&&installs==0&&sleeps.empty());
@@ -93,6 +100,6 @@ int main(){
 actual=function('int RemainingIoMs(')+'\n'+function('void GetStatus(')+'\n'+function('RecoveryResult Reconnect(')
 with tempfile.TemporaryDirectory(prefix='reconnect-state-') as d:
  d=Path(d);cpp=d/'test.cpp';exe=d/'test';cpp.write_text(fixture.replace('/* STATUS_DECL */',status_decl).replace('/* ACTUAL */',actual))
- subprocess.run(shlex.split(os.environ.get('CXX','c++'))+['-std=c++17','-Wall','-Wextra','-Werror','-pthread','-I'+str(HERE),str(cpp),'-o',str(exe)],check=True,timeout=30)
+ subprocess.run(shlex.split(os.environ.get('CXX','c++'))+['-std=c++17','-Wall','-Wextra','-Werror','-pthread','-I'+str(HERE),'-I'+str(HERE.parents[2] / 'common'),str(cpp),'-o',str(exe)],check=True,timeout=30)
  subprocess.run([str(exe)],check=True,timeout=10)
 print('Actual source SHA256',hashlib.sha256(source.encode()).hexdigest())

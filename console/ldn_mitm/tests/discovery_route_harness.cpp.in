@@ -29,6 +29,8 @@ using u8=uint8_t;using u16=uint16_t;using u32=uint32_t;using u64=uint64_t;using 
 #endif
 #define RELAY_PROFILE_IPV4 "127.0.0.1"
 #define RELAY_PROFILE_PORT 11460
+#define RELAY_PROFILE_COMMUNITY_PORT test_community_port
+[[maybe_unused]] static unsigned short test_community_port = 11460;
 #define R_SUCCEEDED(x) ((x)==0)
 #define R_FAILED(x) ((x)!=0)
 #define R_RETURN(x) return (x)
@@ -80,6 +82,8 @@ static int ResultRelayFailed(){return 1;}
 /* ACTUAL_PUT64 */
 static bool ValidCode(const char *code){if(std::strlen(code)!=6)return false;for(int i=0;i<6;i++){char c=code[i];if(!((c>='A'&&c<='Z'&&c!='I'&&c!='O')||(c>='2'&&c<='9')))return false;}return true;}
 /* ACTUAL_LOAD */
+#include "regional_relay.h"
+bool TrustedCommunityEndpoint(u32, u16);
 /* ACTUAL_RESOLVE */
 /* ACTUAL_SELECTION */
 /* ACTUAL_CHOOSE */
@@ -123,13 +127,13 @@ static bool receive(int fd,u8 &type,std::vector<u8> &body){u8 h[3];size_t n=0;wh
 class Relay {
  int listener;std::thread thread;std::atomic<bool>stop{false};
  public:
- std::atomic<int>connections{0},selects{0},finds{0},pages{0},filters{0};u16 port;u32 caps;bool reject_select=false,legacy_error=false;u8 select_error=7;int select_delay_ms=0;std::string expected_provider="lanywhere-public";u16 mutate_port=0;
+ std::atomic<int>connections{0},selects{0},finds{0},pages{0},filters{0};u16 port;u32 caps;bool reject_select=false,legacy_error=false;u8 select_error=7;int select_delay_ms=0;std::string expected_provider="lanywhere-public";u16 mutate_port=0;std::string preferred_code;
  Relay(u32 bits):caps(bits){listener=::socket(AF_INET,SOCK_STREAM,0);assert(listener>=0);int one=1;::setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);assert(::bind(listener,(sockaddr*)&a,sizeof(a))==0);assert(::listen(listener,10)==0);socklen_t n=sizeof(a);assert(::getsockname(listener,(sockaddr*)&a,&n)==0);port=ntohs(a.sin_port);thread=std::thread([this]{run();});}
  ~Relay(){stop=true;::shutdown(listener,SHUT_RDWR);::close(listener);thread.join();}
  void run(){while(!stop){pollfd p{listener,POLLIN,0};if(::poll(&p,1,100)<=0)continue;int fd=::accept(listener,nullptr,nullptr);if(fd<0)continue;connections++;timeval t{2,0};::setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));u8 type;std::vector<u8>b;while(receive(fd,type,b)){
  if(type==T_SelectProvider){selects++;if(reject_select){response(fd,T_Error,{select_error});break;}assert(std::string(b.begin(),b.end())==expected_provider);if(select_delay_ms)std::this_thread::sleep_for(std::chrono::milliseconds(select_delay_ms));std::vector<u8>reply(5+b.size());put32(reply.data(),caps);reply[4]=b.size();std::memcpy(reply.data()+5,b.data(),b.size());response(fd,T_ProviderSelected,reply);}
  else if(type==T_Caps){if(mutate_port)config(mutate_port,"self",false);if(legacy_error)response(fd,T_Error,{4});else{std::vector<u8>reply(4);put32(reply.data(),caps);response(fd,T_CapsReply,reply);}}
- else if(type==T_Find||type==T_FindPage||type==T_FindFilter){u32 offset=0;if(type==T_Find){finds++;assert(b.size()==15);}else if(type==T_FindPage){pages++;assert(b.size()==12);offset=le32(b.data()+8);}else{filters++;assert(b.size()==101);offset=le32(b.data()+97);}const bool paged=type!=T_Find;size_t count=paged&&!offset?6:1;std::vector<u8>reply((paged?5:1)+count*GroupRecordSize);if(paged)put32(reply.data(),offset?GroupPageEnd:6);reply[paged?4:0]=count;for(size_t i=0;i<count;i++){size_t at=(paged?5:1)+i*GroupRecordSize;std::memcpy(reply.data()+at,"ABC234",6);put64(reply.data()+at+6,42);}response(fd,paged?T_Page:T_Groups,reply);}
+ else if(type==T_Find||type==T_FindPage||type==T_FindFilter){u32 offset=0;if(type==T_Find){finds++;assert(b.size()==15);if(!preferred_code.empty())assert(std::memcmp(b.data()+8,preferred_code.c_str(),6)==0);}else if(type==T_FindPage){pages++;assert(b.size()==12);offset=le32(b.data()+8);}else{filters++;assert(b.size()==101);offset=le32(b.data()+97);}const bool paged=type!=T_Find;size_t count=paged&&!offset?6:1;std::vector<u8>reply((paged?5:1)+count*GroupRecordSize);if(paged)put32(reply.data(),offset?GroupPageEnd:6);reply[paged?4:0]=count;for(size_t i=0;i<count;i++){size_t at=(paged?5:1)+i*GroupRecordSize;std::memcpy(reply.data()+at,"ABC234",6);put64(reply.data()+at+6,42);}response(fd,paged?T_Page:T_Groups,reply);}
  else assert(false);
  }::close(fd);}}
 };
@@ -180,6 +184,36 @@ int main(){
   assert(R_SUCCEEDED(JoinRoom("ABC234",UINT64_MAX,&selected))&&enter_calls==1&&entered_provider=="lanplay-cn-jax");
   ClearSelectionLocked();
   assert(R_FAILED(JoinRoom("ABC234",UINT64_MAX,&selected))&&enter_calls==1);checks++;
+ }
+ {
+  Relay upstream(0);
+  upstream.legacy_error=true;
+  upstream.preferred_code="ABC234";
+  test_community_port=upstream.port;
+  config(other.port,"self");
+  DiscoveryRoute selected{};
+  assert(CaptureDiscoveryRoute(&selected));
+  selected.ipv4=htonl(INADDR_LOOPBACK);
+  selected.port=htons(upstream.port);
+  selected.selected_game_id=42;
+  std::strcpy(selected.provider,REGION_PROVIDER_COMMUNITY);
+  SelectRouteLocked(selected,"ABC234");selected=g_selection;
+  sockaddr_in endpoint{};char provider[33]{};
+  assert(ResolveDiscoveryRoute(selected,&endpoint,provider)&&endpoint.sin_port==htons(upstream.port));
+  DiscoveryRoute forged=selected;forged.port=htons(other.port);
+  assert(!ResolveDiscoveryRoute(forged,&endpoint,provider));
+  endpoint.sin_port=htons(other.port);const char *error=nullptr;
+  assert(ConnectServer(endpoint,&error,100,REGION_PROVIDER_COMMUNITY)<0);
+  u32 next=GroupPageEnd;const int n=found_count;
+  assert(FindGroupsFilteredPage(ldn::ScanFilter{},0,&next,found,nullptr,&selected)==1&&found_count==n+1);
+  assert(upstream.connections==1&&upstream.selects==0&&upstream.finds==1&&upstream.pages==0);
+  enter_calls=0;
+  assert(R_FAILED(JoinRoom("DEF567",42,&selected))&&enter_calls==0);
+  assert(R_SUCCEEDED(JoinRoom("ABC234",42,&selected))&&enter_calls==1&&entered_provider==REGION_PROVIDER_COMMUNITY&&entered_server.sin_port==htons(upstream.port));
+  ClearSelectionLocked();
+  assert(R_FAILED(JoinRoom("ABC234",42,&selected))&&enter_calls==1);
+  test_community_port=11460;
+  checks+=8;
  }
  {Relay relay(0);relay.expected_provider="lanplay-nl";relay.select_delay_ms=1200;config(relay.port,"lanplay-nl");DiscoveryRoute route{};assert(CaptureDiscoveryRoute(&route));sockaddr_in server{};char provider[33]{};assert(ResolveDiscoveryRoute(route,&server,provider));const char *error=nullptr;const int fd=ConnectServer(server,&error,100,provider);assert(fd>=0&&relay.connections==1&&relay.selects==1);::close(fd);checks++;}
  {Relay relay(0);relay.expected_provider="lanplay-nl";relay.select_delay_ms=700;config(relay.port,"lanplay-nl");

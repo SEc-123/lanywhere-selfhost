@@ -88,6 +88,9 @@ test('configuration accepts documented values and rejects injection, duplicates 
     validateConfig('LANYWHERE_UDP_BIND_ADDRESS=192.0.2.10\nLANYWHERE_JOIN_TIMEOUT_MS=120000\nLANYWHERE_CREATE_PER_MIN=1000',
         { localAddresses: ['192.0.2.10'] });
     validateConfig('LANYWHERE_EU_RELAY=192.0.2.10:11460');
+    validateConfig('LANYWHERE_ENABLE_PUBLIC_UPSTREAM=1\nLANYWHERE_ENABLE_COMMUNITY_DIRECT=1');
+    assert.throws(() => validateConfig('LANYWHERE_ENABLE_COMMUNITY_DIRECT=1'), /requires LANYWHERE_ENABLE_PUBLIC_UPSTREAM=1/);
+    assert.throws(() => validateConfig('LANYWHERE_ENABLE_COMMUNITY_DIRECT=2'), /between 0 and 1/);
     for (const value of ['localhost:11460', '192.0.2.10:0', '192.0.2.10:65536', '0.0.0.0:11460', '224.0.0.1:11460'])
         assert.throws(() => validateConfig(`LANYWHERE_EU_RELAY=${value}`), /LANYWHERE_EU_RELAY must be a/);
     for (const value of ['localhost', '1.2.3.999', '127.00.0.1', '::1'])

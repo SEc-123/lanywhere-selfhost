@@ -48,7 +48,9 @@
     AMS_SF_METHOD_INFO(C, H, 28, Result, GetRelayRegion, (ams::sf::Out<u32> region), (region)) \
     AMS_SF_METHOD_INFO(C, H, 29, Result, SetRelayRegion, (u32 region), (region)) \
     AMS_SF_METHOD_INFO(C, H, 30, Result, GetRegionalRoomPasscode, (RegionalPasscodeLookup lookup, ams::sf::Out<RoomPasscodeReply> reply), (lookup, reply)) \
-    AMS_SF_METHOD_INFO(C, H, 31, Result, UnlockRegionalGameRoom, (RegionalAccessUnlock unlock, ams::sf::Out<u32> status), (unlock, status))
+    AMS_SF_METHOD_INFO(C, H, 31, Result, UnlockRegionalGameRoom, (RegionalAccessUnlock unlock, ams::sf::Out<u32> status), (unlock, status)) \
+    AMS_SF_METHOD_INFO(C, H, 32, Result, GetRelayRegions, (ams::sf::Out<u32> mask), (mask)) \
+    AMS_SF_METHOD_INFO(C, H, 33, Result, ListCommunityRooms, (UnifiedRoomsRequest request, ams::sf::Out<UnifiedPage> page, const ams::sf::OutBuffer &out), (request, page, out))
 
 AMS_SF_DEFINE_INTERFACE(ams::mitm::lanywhere, ILanywhereService, AMS_ILANYWHERE_SERVICE, 0x594E414C)
 
@@ -85,6 +87,8 @@ namespace ams::mitm::lanywhere {
             Result GetAppointmentAlertState(sf::Out<u32> status);
             Result ListRegionalRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out);
             Result GetRelayRegion(sf::Out<u32> region);
+            Result GetRelayRegions(sf::Out<u32> mask);
+            Result ListCommunityRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out);
             Result SetRelayRegion(u32 region);
             Result GetRegionalRoomPasscode(RegionalPasscodeLookup lookup, sf::Out<RoomPasscodeReply> reply);
             Result UnlockRegionalGameRoom(RegionalAccessUnlock unlock, sf::Out<u32> status);

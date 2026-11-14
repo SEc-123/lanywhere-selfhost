@@ -45,7 +45,7 @@ def main():
     intent = source[source.index('        struct MatchTicket {'):source.index('        bool ValidCode(', source.index('        struct MatchTicket {'))]
     native = match_status + intent + '\n' + '\n'.join(function(source, sig) for sig in [
         'bool CaptureGameRoute(', 'bool CaptureHostGameRoute(', 'bool GameRouteStillCurrent(',
-        'bool ArmedLocked(', 'u32 GetRelayRegion(', 'Result SetRelayRegion(',
+        'bool ArmedLocked(', 'u32 GetRelayRegion(', 'u32 GetRelayRegions(', 'bool CommunityReachable(', 'Result SetRelayRegion(',
         'bool CaptureAppointmentRoute(', 'bool AppointmentBackendCurrent(',
         'bool CaptureRegionalRoute(', 'bool RegionalRouteCurrent(',
         'void SetMatchState(', 's64 MatchRemainingMs(', 'bool SameTicket(',
@@ -59,7 +59,8 @@ def main():
     service_header = (SOURCE.parent / 'lanywhere_service.hpp').read_text()
     names = [(17, 'SetRoomPasscode'), (18, 'GetRoomPasscode'), (19, 'GetRoomPasscodeHost'),
              (20, 'SetGameRoomAccess'), (21, 'UnlockGameRoom'), (25, 'SelectUnifiedLobbyRoom'),
-             (28, 'GetRelayRegion'), (29, 'SetRelayRegion'), (30, 'GetRegionalRoomPasscode'), (31, 'UnlockRegionalGameRoom')]
+             (28, 'GetRelayRegion'), (29, 'SetRelayRegion'), (30, 'GetRegionalRoomPasscode'), (31, 'UnlockRegionalGameRoom'),
+             (32, 'GetRelayRegions')]
     for number, name in names:
         assert re.search(rf'AMS_SF_METHOD_INFO\(C, H, {number}, Result, {name}\b', service_header)
     ipc = '\n'.join(function(service, f'Result LanywhereService::{name}(') for _, name in names)

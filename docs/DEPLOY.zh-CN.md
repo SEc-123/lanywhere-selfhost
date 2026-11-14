@@ -16,4 +16,4 @@ bash scripts/build-container.sh --embedded
 
 解压生成的 SD 包到卡根目录，重启 Atmosphère，从相册打开 **LANywhere Self-host**。两台主机选择同一网络，在同版本游戏的本地无线模式中验证建房、加入和完整对局。
 
-自建服不会同步公开实例的房间。对局协议目前未加密。
+自建服默认提供自己的房间。接入社区大厅或为玩家启用社区直连，见[社区与地区线路配置](distribution/REGIONAL-RELAYS.md)。对局协议目前未加密。

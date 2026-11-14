@@ -207,15 +207,33 @@ namespace ams::mitm::lanywhere {
                    server->sin_addr.s_addr != INADDR_ANY && server->sin_addr.s_addr != INADDR_BROADCAST;
         }
 
+        bool CommunityEndpoint(sockaddr_in *out) {
+            *out = {};
+            out->sin_family = AF_INET;
+            if (!RELAY_PROFILE_COMMUNITY_IPV4[0] || RELAY_PROFILE_COMMUNITY_PORT < 1 ||
+                RELAY_PROFILE_COMMUNITY_PORT > 65535) return false;
+            out->sin_port = htons(RELAY_PROFILE_COMMUNITY_PORT);
+            return ::inet_pton(AF_INET, RELAY_PROFILE_COMMUNITY_IPV4, &out->sin_addr) == 1 &&
+                out->sin_addr.s_addr != INADDR_ANY && out->sin_addr.s_addr != INADDR_BROADCAST;
+        }
+
+        bool TrustedCommunityEndpoint(u32 ipv4, u16 port) {
+            sockaddr_in expected{};
+            return CommunityEndpoint(&expected) && expected.sin_addr.s_addr == ipv4 && expected.sin_port == port;
+        }
+
         bool ResolveDiscoveryRoute(const DiscoveryRoute &route, sockaddr_in *server, char provider[33]) {
             const char *end = static_cast<const char *>(std::memchr(route.provider, '\0', sizeof(route.provider)));
             if (!end || !route.ipv4 || route.ipv4 == INADDR_BROADCAST || !route.port ||
                 (std::strcmp(route.provider, "self") && std::strcmp(route.provider, "lanywhere-public") &&
+                 std::strcmp(route.provider, REGION_PROVIDER_COMMUNITY) &&
                  std::strcmp(route.provider, "lanplay-nl") && std::strcmp(route.provider, "lanplay-br") &&
                  std::strcmp(route.provider, "lanplay-id") && std::strcmp(route.provider, "lanplay-nl-jaysea-rust") &&
                  std::strcmp(route.provider, "lanplay-nl-r3ps4j-rust") && std::strcmp(route.provider, "lanplay-nl-r3ps4j-11452") && std::strcmp(route.provider, "lanplay-de-servegame") &&
                  std::strcmp(route.provider, "lanplay-cn-jax") && std::strcmp(route.provider, "lanplay-cn-gugu") &&
                  std::strcmp(route.provider, "lanplay-cn-olunira") && std::strcmp(route.provider, "lanplay-cn-shanghai"))) return false;
+            if (!std::strcmp(route.provider, REGION_PROVIDER_COMMUNITY) &&
+                !TrustedCommunityEndpoint(route.ipv4, route.port)) return false;
             *server = {};
             server->sin_family = AF_INET;
             server->sin_addr.s_addr = route.ipv4;
@@ -231,6 +249,37 @@ namespace ams::mitm::lanywhere {
         constexpr u64 HostRouteEpoch = UINT64_MAX;
         u32 g_relay_region = RelayRegionDefault;
         u64 g_gameplay_generation = 1;
+        u32 g_directory_regions = 0;
+        u32 g_directory_ipv4 = 0;
+        u16 g_directory_port = 0;
+        u64 g_directory_until_ms = 0;
+        constexpr u64 DirectoryOfferLifetimeMs = 75'000;
+        u64 SelectionNowMs();
+
+        u32 EnabledDirectoryRegionsLocked(const sockaddr_in &central) {
+            if (g_directory_ipv4 != central.sin_addr.s_addr || g_directory_port != central.sin_port ||
+                SelectionNowMs() >= g_directory_until_ms) {
+                g_directory_regions = 0;
+                g_directory_ipv4 = 0;
+                g_directory_port = 0;
+            }
+            return g_directory_regions;
+        }
+
+        void RememberDirectoryRegions(const DiscoveryRoute &route, u32 enabled) {
+            std::scoped_lock lock(g_lock);
+            sockaddr_in central{};
+            if (!LoadServer(&central) || central.sin_addr.s_addr != route.ipv4 || central.sin_port != route.port)
+                return;
+            g_directory_ipv4 = route.ipv4;
+            g_directory_port = route.port;
+            g_directory_regions = enabled;
+            g_directory_until_ms = SelectionNowMs() + DirectoryOfferLifetimeMs;
+        }
+
+        const char *GameplayProviderLocked() {
+            return g_relay_region == RelayRegionCommunity ? REGION_PROVIDER_COMMUNITY : "self";
+        }
 
         bool EuropeEndpoint(sockaddr_in *out) {
             *out = {};
@@ -244,7 +293,13 @@ namespace ams::mitm::lanywhere {
 
         bool RegionEndpointLocked(u32 region, sockaddr_in *out) {
             if (region == RelayRegionDefault) return LoadServer(out);
-            return region == RelayRegionEurope && LoadServer() && EuropeEndpoint(out);
+            if (region == RelayRegionEurope) return LoadServer() && EuropeEndpoint(out);
+            return region == RelayRegionCommunity && LoadServer() && CommunityEndpoint(out);
+        }
+
+        bool CommunityOfferedLocked() {
+            sockaddr_in central{};
+            return LoadServer(&central) && (EnabledDirectoryRegionsLocked(central) & (1u << RelayRegionCommunity));
         }
 
         bool TrustedSelfEndpointLocked(const DiscoveryRoute &route) {
@@ -287,12 +342,14 @@ namespace ams::mitm::lanywhere {
             if (route.selection_epoch == HostRouteEpoch || route.selection_epoch == DefaultGameRouteEpoch) {
                 if (route.gameplay_generation != g_gameplay_generation || !GameplayEndpointLocked(&server) ||
                     server.sin_addr.s_addr != route.ipv4 || server.sin_port != route.port ||
-                    std::strcmp(route.provider, "self")) return false;
+                    std::strcmp(route.provider, GameplayProviderLocked())) return false;
                 if (route.selection_epoch == HostRouteEpoch) return true;
-                return !g_selection.selection_epoch && g_public && route.public_enabled &&
+                return !g_selection.selection_epoch && (g_public || g_relay_region == RelayRegionCommunity) &&
+                    route.public_enabled &&
                     !route.selected_game_id && !route.selected_code[0];
             }
             const bool endpoint_valid = !std::strcmp(route.provider, "self") ? TrustedSelfEndpointLocked(route) :
+                !std::strcmp(route.provider, REGION_PROVIDER_COMMUNITY) ? TrustedCommunityEndpoint(route.ipv4, route.port) :
                 (LoadServer(&server) && server.sin_addr.s_addr == route.ipv4 && server.sin_port == route.port);
             return endpoint_valid && route.ipv4 == g_selection.ipv4 && route.port == g_selection.port &&
                 route.selection_epoch == g_selection.selection_epoch &&
@@ -527,7 +584,12 @@ namespace ams::mitm::lanywhere {
 
         int ConnectServer(const sockaddr_in &server, const char **err, int timeout_ms = ConnectTimeoutMs, const char *provider = "self", u32 *status = nullptr, u64 deadline_ms = 0) {
             if (status) *status = ListStatusNetwork;
-            const bool external = std::strcmp(provider, "self") != 0;
+            const bool community_direct = !std::strcmp(provider, REGION_PROVIDER_COMMUNITY);
+            if (community_direct && !TrustedCommunityEndpoint(server.sin_addr.s_addr, server.sin_port)) {
+                *err = "Community node address is not configured.";
+                return -1;
+            }
+            const bool external = !community_direct && std::strcmp(provider, "self") != 0;
             if (external) timeout_ms = std::max(timeout_ms, ConnectTimeoutMs);
             timeout_ms = RemainingIoMs(timeout_ms, deadline_ms);
             if (timeout_ms <= 0) { *err = "el servidor no responde"; return -1; }
@@ -581,6 +643,46 @@ namespace ams::mitm::lanywhere {
             }
             if (status) *status = ListStatusOk;
             return fd;
+        }
+
+        constexpr const char CommunityUnreachable[] = "Community node is unreachable from this Switch.";
+
+        bool CommunityReachable(const sockaddr_in &endpoint) {
+            constexpr int ProbeBudgetMs = 1500;
+            const u64 deadline = SelectionNowMs() + ProbeBudgetMs;
+            const char *error = nullptr;
+            const int fd = ConnectServer(endpoint, &error, ProbeBudgetMs, REGION_PROVIDER_COMMUNITY, nullptr, deadline);
+            if (fd < 0) return false;
+            u8 type = 0, response[1]{};
+            const bool reachable = SendFrameTo(fd, T_Ping, nullptr, 0, nullptr, 0) &&
+                ReadFrame(fd, &type, response, sizeof(response), RemainingIoMs(ProbeBudgetMs, deadline)) == 0 &&
+                type == T_Pong;
+            ::close(fd);
+            return reachable;
+        }
+
+        bool ValidCommunityRoom(const u8 *reply, size_t size) {
+            constexpr size_t RoomHeaderSize = 24, MemberSize = 37;
+            if (size < RoomHeaderSize || !le32(reply + 11) || reply[6] >= MaxMembers ||
+                !reply[23] || reply[23] > MaxMembers || size != RoomHeaderSize + reply[23] * MemberSize)
+                return false;
+            for (size_t i = 0; i < CodeLength; ++i) {
+                const u8 c = reply[i];
+                if (!((c >= 'A' && c <= 'Z' && c != 'I' && c != 'O') || (c >= '2' && c <= '9'))) return false;
+            }
+            u32 members[MaxMembers]{};
+            for (size_t i = 0; i < reply[23]; ++i) {
+                const u8 *member = reply + RoomHeaderSize + i * MemberSize;
+                const u8 index = member[0];
+                const u32 ip = le32(member + 1);
+                const bool virtual_ip = ((ip & 0xffff0000u) == LanPlayNet &&
+                    (ip & 0xffffu) && (ip & 0xffffu) != 0xffffu) ||
+                    ((ip & 0xffffff00u) == VirtualNet && (ip & 0xffu) && (ip & 0xffu) <= MaxMembers);
+                if (index >= MaxMembers || members[index] || !virtual_ip ||
+                    std::find(std::begin(members), std::end(members), ip) != std::end(members)) return false;
+                members[index] = ip;
+            }
+            return members[reply[6]] && members[reply[6]] == le32(reply + 7);
         }
 
         bool ApplyTcpAdmissionFeatures(u8 type,u8 *body,size_t size,u32 capabilities,bool worker_ready) {
@@ -650,6 +752,12 @@ namespace ams::mitm::lanywhere {
                             code == 3 ? "la sala es de otro juego" : msg);
             }
             if (rtype != T_Room || n < 24) return fail("respuesta inesperada");
+            if (!std::strcmp(provider, REGION_PROVIDER_COMMUNITY) && (!ValidCommunityRoom(s->reply, n) ||
+                (type == T_Create && (size < 8 || s->reply[6] != 0 || le64(s->reply + 15) != le64(body))) ||
+                (type == T_Join && (size < 46 || std::memcmp(s->reply, body, CodeLength) ||
+                    (le64(body + 38) && le64(s->reply + 15) != le64(body + 38)))))) {
+                return fail("Community node returned an invalid room.");
+            }
             s->reply_size = n;
 
             // Datos: registrar el UDP (el servidor contesta REGISTERED).
@@ -675,7 +783,8 @@ namespace ams::mitm::lanywhere {
                 }
             }
             if (!registered) {
-                if (type == T_Join && size == 65) {
+                if ((type == T_Join && size == 65) ||
+                    (type != T_Resume && !std::strcmp(provider, REGION_PROVIDER_COMMUNITY))) {
                     SendFrameTo(s->tcp, T_Leave, nullptr, 0, nullptr, 0);
                     s->error_code = 0xff;  // the relay committed; the seat was explicitly released
                 }
@@ -1176,14 +1285,14 @@ namespace ams::mitm::lanywhere {
         if (!LoadServer(&server, out->discovery.provider)) return false;
         out->discovery.ipv4 = server.sin_addr.s_addr;
         out->discovery.port = server.sin_port;
-        out->discovery.public_enabled = g_public;
-        if (g_public) {
+        out->discovery.public_enabled = g_public || g_relay_region == RelayRegionCommunity;
+        if (out->discovery.public_enabled) {
             // Games can alternate hosting and searching without a lobby card.
             // Unselected online searches use the same relay as automatic hosts.
             if (!GameplayEndpointLocked(&server)) return false;
             out->discovery.ipv4 = server.sin_addr.s_addr;
             out->discovery.port = server.sin_port;
-            util::Strlcpy(out->discovery.provider, "self", sizeof(out->discovery.provider));
+            util::Strlcpy(out->discovery.provider, GameplayProviderLocked(), sizeof(out->discovery.provider));
             out->discovery.selection_epoch = DefaultGameRouteEpoch;
             out->discovery.gameplay_generation = g_gameplay_generation;
         }
@@ -1201,7 +1310,7 @@ namespace ams::mitm::lanywhere {
         out->discovery.ipv4 = server.sin_addr.s_addr;
         out->discovery.port = server.sin_port;
         out->discovery.public_enabled = true;
-        util::Strlcpy(out->discovery.provider, "self", sizeof(out->discovery.provider));
+        util::Strlcpy(out->discovery.provider, GameplayProviderLocked(), sizeof(out->discovery.provider));
         out->discovery.selection_epoch = HostRouteEpoch;
         out->discovery.gameplay_generation = g_gameplay_generation;
         return true;
@@ -1403,14 +1512,17 @@ namespace ams::mitm::lanywhere {
 
     bool SendData(u32 dst_ip, u16 src_port, u16 dst_port, const void *data, size_t size) {
         if (size > MaxUdpPayload) { errno = EMSGSIZE; return false; }
-        u8 body[8 + 1455];
+        u8 body[8 + MaxPayload];
         const u32 mask = Netmask();
         put32(body, dst_ip == 0xFFFFFFFFu ? ((g_net_ip.load() & mask) | ~mask) : dst_ip);
         put16(body + 4, src_port);
         put16(body + 6, dst_port);
         std::scoped_lock lk(g_lock);
         if (g_state == RelayState::InRoom) {
-            const auto mode = ChooseSendMode(size, (g_udp_features & CapabilityFragment) != 0);
+            const bool fragments = (g_udp_features & CapabilityFragment) != 0;
+            const auto mode = !fragments && size <= MaxPayload &&
+                !std::strcmp(g_room_provider, REGION_PROVIDER_COMMUNITY) ?
+                SendMode::Legacy : ChooseSendMode(size, fragments);
             if (mode == SendMode::Legacy) {
                 if (size) std::memcpy(body + 8, data, size);
                 if (UdpSend(U_Data, body, 8 + size)) { g_sent++; return true; }
@@ -1418,7 +1530,9 @@ namespace ams::mitm::lanywhere {
                 return false;
             }
             if (mode == SendMode::TooLarge) {
-                util::Strlcpy(g_error, "Update relay for larger game packets.", sizeof(g_error));
+                util::Strlcpy(g_error, std::strcmp(g_room_provider, REGION_PROVIDER_COMMUNITY) ?
+                    "Update relay for larger game packets." : "Community node cannot carry larger game packets.",
+                    sizeof(g_error));
                 errno = EMSGSIZE; return false;
             }
             const u32 id = ++g_fragment_id;
@@ -1686,6 +1800,7 @@ namespace ams::mitm::lanywhere {
                 server.sin_addr.s_addr = authorized_route->ipv4;
                 server.sin_port = authorized_route->port;
             } else if (mode == MatchMode::Quick) {
+                if (g_relay_region == RelayRegionCommunity) return ResultRelayFailed();
                 configured = GameplayEndpointLocked(&server);
             }
         }
@@ -1702,7 +1817,7 @@ namespace ams::mitm::lanywhere {
                     SelectRouteLocked(route, code);
                 } else {
                     sockaddr_in current{};
-                    if (mode == MatchMode::Quick && (!GameplayEndpointLocked(&current) ||
+                    if (mode == MatchMode::Quick && (g_relay_region == RelayRegionCommunity || !GameplayEndpointLocked(&current) ||
                         current.sin_addr.s_addr != server.sin_addr.s_addr || current.sin_port != server.sin_port))
                         return ResultRelayFailed();
                     ClearSelectionLocked();
@@ -1753,19 +1868,45 @@ namespace ams::mitm::lanywhere {
         return g_relay_region;
     }
 
+    u32 GetRelayRegions() {
+        std::scoped_lock lock(g_lock);
+        sockaddr_in central{};
+        u32 mask = 1u << RelayRegionDefault;
+        if (LoadServer(&central)) mask |= EnabledDirectoryRegionsLocked(central);
+        if (g_state == RelayState::InRoom && !std::strcmp(g_room_provider, REGION_PROVIDER_COMMUNITY))
+            mask |= RELAY_REGION_COMMUNITY_ACTIVE;
+        return mask;
+    }
+
     Result SetRelayRegion(u32 region) {
+        sockaddr_in endpoint{};
+        if (region == RelayRegionCommunity) {
+            {
+                std::scoped_lock match_lock(g_match_lock);
+                std::scoped_lock lock(g_lock);
+                if (!CommunityOfferedLocked() || !RegionEndpointLocked(region, &endpoint) || g_state == RelayState::InRoom ||
+                    g_state == RelayState::Connecting || g_recovering || ArmedLocked() || g_match.in_flight)
+                    return ResultRelayFailed();
+            }
+            if (!CommunityReachable(endpoint)) {
+                std::scoped_lock lock(g_lock);
+                if (g_state != RelayState::InRoom && g_state != RelayState::Connecting)
+                    util::Strlcpy(g_error, CommunityUnreachable, sizeof(g_error));
+                return ResultCommunityUnreachable();
+            }
+        }
         std::scoped_lock lifecycle(g_room_lifecycle_lock);
         std::scoped_lock match_lock(g_match_lock);
         std::scoped_lock lock(g_lock);
-        sockaddr_in endpoint{};
-        if (!RegionEndpointLocked(region, &endpoint) || g_state == RelayState::InRoom ||
-            g_state == RelayState::Connecting || g_recovering || ArmedLocked() || g_match.in_flight)
+        if ((region == RelayRegionCommunity && !CommunityOfferedLocked()) || !RegionEndpointLocked(region, &endpoint) ||
+            g_state == RelayState::InRoom || g_state == RelayState::Connecting || g_recovering || ArmedLocked() || g_match.in_flight)
             return ResultRelayFailed();
         if (g_relay_region != region) {
             do { ++g_gameplay_generation; } while (!g_gameplay_generation);
             g_relay_region = region;
         }
         ClearSelectionLocked();
+        if (!std::strcmp(g_error, CommunityUnreachable)) g_error[0] = '\0';
         R_SUCCEED();
     }
 
@@ -1783,7 +1924,11 @@ namespace ams::mitm::lanywhere {
             if (g_state == RelayState::InRoom || g_state == RelayState::Connecting || !LoadServer(&server))
                 return ResultRelayFailed();
             const bool europe = !std::strcmp(request.provider, REGION_PROVIDER_EU);
+            const bool community = !std::strcmp(request.provider, REGION_PROVIDER_COMMUNITY);
             if (europe && !EuropeEndpoint(&server)) return ResultRelayFailed();
+            if (community && (request.game_id == UINT64_MAX ||
+                !(EnabledDirectoryRegionsLocked(server) & (1u << RelayRegionCommunity)) ||
+                !CommunityEndpoint(&server))) return ResultRelayFailed();
             route.ipv4 = server.sin_addr.s_addr;
             route.port = server.sin_port;
             route.public_enabled = true;
@@ -1793,6 +1938,12 @@ namespace ams::mitm::lanywhere {
         sockaddr_in endpoint{};
         char provider[33]{};
         if (!ResolveDiscoveryRoute(route, &endpoint, provider)) return ResultRelayFailed();
+        if (!std::strcmp(provider, REGION_PROVIDER_COMMUNITY) && !CommunityReachable(endpoint)) {
+            std::scoped_lock lock(g_lock);
+            if (g_state != RelayState::InRoom && g_state != RelayState::Connecting)
+                util::Strlcpy(g_error, CommunityUnreachable, sizeof(g_error));
+            return ResultCommunityUnreachable();
+        }
         if (!std::strcmp(provider, "self")) {
             if (request.game_id == UINT64_MAX) return ResultRelayFailed();
             R_RETURN(StartMatch(MatchMode::Exact, request.code, nullptr, &route));
@@ -1803,14 +1954,20 @@ namespace ams::mitm::lanywhere {
             std::scoped_lock match_lock(g_match_lock);
             std::scoped_lock lock(g_lock);
             sockaddr_in current{};
-            if (g_state == RelayState::InRoom || g_state == RelayState::Connecting ||
-                !LoadServer(&current) || current.sin_addr.s_addr != route.ipv4 || current.sin_port != route.port)
+            if (g_state == RelayState::InRoom || g_state == RelayState::Connecting || !LoadServer(&current))
                 return ResultRelayFailed();
+            if (!std::strcmp(route.provider, REGION_PROVIDER_COMMUNITY)) {
+                if (!(EnabledDirectoryRegionsLocked(current) & (1u << RelayRegionCommunity)) ||
+                    !TrustedCommunityEndpoint(route.ipv4, route.port)) return ResultRelayFailed();
+            } else if (current.sin_addr.s_addr != route.ipv4 || current.sin_port != route.port) {
+                return ResultRelayFailed();
+            }
             old = g_match.ticket;
             pending = g_release_next;
             g_release_next = {};
             g_match = {};
             SelectRouteLocked(route, request.code);
+            if (!std::strcmp(g_error, CommunityUnreachable)) g_error[0] = '\0';
         }
         ReleaseTicket(old);
         ReleaseTicket(pending);
@@ -2161,13 +2318,15 @@ namespace ams::mitm::lanywhere {
 
     namespace {
         int ReadLegacyDiscovery(int fd, u64 local_communication_id, bool from_app,
-                                void (*found)(const char *, const void *, void *), void *user) {
+                                void (*found)(const char *, const void *, void *), void *user,
+                                const char *preferred = nullptr) {
             constexpr size_t MaxLegacyGroups = 8;
             static constinit os::SdkMutex legacy_lock;
             static u8 reply[1 + MaxLegacyGroups * GroupRecordSize];
             std::scoped_lock lock(legacy_lock);
             u8 body[8 + CodeLength + 1]{};
             put64(body, local_communication_id);
+            if (preferred) std::memcpy(body + 8, preferred, CodeLength);
             body[8 + CodeLength] = from_app ? 1 : 0;
             u8 type = 0;
             ssize_t size = -1;
@@ -2221,9 +2380,10 @@ namespace ams::mitm::lanywhere {
         }
 
         int ReadUnfilteredPage(int fd, u32 caps, u64 local_communication_id, u32 offset, u32 *next,
-                               bool from_app, void (*found)(const char *, const void *, void *), void *user) {
+                               bool from_app, void (*found)(const char *, const void *, void *), void *user,
+                               const char *preferred) {
             if (!(caps & CapabilityPages))
-                return offset == 0 ? ReadLegacyDiscovery(fd, local_communication_id, from_app, found, user) : 0;
+                return offset == 0 ? ReadLegacyDiscovery(fd, local_communication_id, from_app, found, user, preferred) : 0;
             u8 body[12];
             put64(body, local_communication_id);
             put32(body + 8, offset);
@@ -2238,7 +2398,7 @@ namespace ams::mitm::lanywhere {
         const char *error = nullptr;
         const int fd = DiscoveryConnection(route, &captured, &error);
         if (fd < 0) return -1;
-        const int count = ReadLegacyDiscovery(fd, local_communication_id, from_app, found, user);
+        const int count = ReadLegacyDiscovery(fd, local_communication_id, from_app, found, user, captured.selected_code);
         ::close(fd);
         return count;
     }
@@ -2254,7 +2414,7 @@ namespace ams::mitm::lanywhere {
         if (fd < 0) return -1;
         u32 caps = 0;
         const bool queried = QueryCapabilities(fd, &caps, ConnectTimeoutMs);
-        const int count = queried ? ReadUnfilteredPage(fd, caps, local_communication_id, offset, next, true, found, user) : -1;
+        const int count = queried ? ReadUnfilteredPage(fd, caps, local_communication_id, offset, next, true, found, user, captured.selected_code) : -1;
         ::close(fd);
         return count;
     }
@@ -2282,7 +2442,7 @@ namespace ams::mitm::lanywhere {
         } else {
             const u64 id = (filter.flag & ldn::ScanFilterFlag_LocalCommunicationId) ?
                 filter.networkId.intentId.localCommunicationId : 0;
-            count = ReadUnfilteredPage(fd, caps, id, offset, next, false, found, user);
+            count = ReadUnfilteredPage(fd, caps, id, offset, next, false, found, user, captured.selected_code);
         }
         ::close(fd);
         return count;
@@ -2370,7 +2530,7 @@ namespace ams::mitm::lanywhere {
         bool CaptureRegionalRoute(u32 region, DiscoveryRoute *out) {
             std::scoped_lock lock(g_lock);
             sockaddr_in endpoint{};
-            if (!RegionEndpointLocked(region, &endpoint)) return false;
+            if (region == RelayRegionCommunity || !RegionEndpointLocked(region, &endpoint)) return false;
             *out = {};
             out->ipv4 = endpoint.sin_addr.s_addr;
             out->port = endpoint.sin_port;
@@ -2795,9 +2955,10 @@ namespace ams::mitm::lanywhere {
     }
 
 
-    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity, bool regional) {
-        sockaddr_in europe{};
-        regional = regional && EuropeEndpoint(&europe);
+    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity, bool regional, bool community_aware) {
+        sockaddr_in europe{}, community{};
+        const bool has_europe = regional && EuropeEndpoint(&europe);
+        const bool has_community = community_aware && CommunityEndpoint(&community);
         *page = {-1, UNIFIED_LOBBY_END, 0, 0, 0, ListStatusProtocol};
         if (!groups || capacity < UNIFIED_LOBBY_PAGE_SIZE || (request.offset && !request.snapshot)) return;
         std::memset(groups, 0, sizeof(UnifiedGroup) * UNIFIED_LOBBY_PAGE_SIZE);
@@ -2817,20 +2978,37 @@ namespace ams::mitm::lanywhere {
             ::close(fd);
             return;
         }
-        if (!(caps & (regional ? REGIONAL_LOBBY_CAPABILITY : UNIFIED_LOBBY_CAPABILITY))) {
+        const bool extended = community_aware && (has_europe || has_community) && (caps & COMMUNITY_LOBBY_CAPABILITY);
+        const bool legacy_regional = has_europe && (!community_aware || (caps & REGIONAL_LOBBY_CAPABILITY));
+        const bool regional_wire = extended || legacy_regional;
+        const u32 required = extended ? COMMUNITY_LOBBY_CAPABILITY :
+            legacy_regional ? REGIONAL_LOBBY_CAPABILITY : UNIFIED_LOBBY_CAPABILITY;
+        if (!(caps & required)) {
             ::close(fd);
+            if (community_aware && !request.offset && !request.snapshot) RememberDirectoryRegions(route, 0);
             // A valid CAPS reply lacking the extension is explicit unsupported.
             page->status = ListStatusUpdate;
             return;
         }
-        u8 body[8]{};
+        u8 body[COMMUNITY_LOBBY_REQUEST_SIZE]{};
         put32(body, request.offset);
         put32(body + 4, request.snapshot);
+        if (extended) {
+            if (has_europe) {
+                std::memcpy(body + 8, &europe.sin_addr.s_addr, 4);
+                std::memcpy(body + 12, &europe.sin_port, 2);
+            }
+            if (has_community) {
+                std::memcpy(body + 8 + REGIONAL_ENDPOINT_SIZE, &community.sin_addr.s_addr, 4);
+                std::memcpy(body + 12 + REGIONAL_ENDPOINT_SIZE, &community.sin_port, 2);
+            }
+        }
         u8 reply[UNIFIED_LOBBY_HEADER_SIZE + UNIFIED_LOBBY_PAGE_SIZE * sizeof(UnifiedGroup)]{};
         u8 type = 0;
         page->status = ListStatusNetwork;
         ssize_t bytes = -1;
-        if (SendFrameTo(fd, regional ? REGIONAL_LOBBY_REQUEST_TYPE : UNIFIED_LOBBY_REQUEST_TYPE, body, sizeof(body), nullptr, 0))
+        if (SendFrameTo(fd, regional_wire ? REGIONAL_LOBBY_REQUEST_TYPE : UNIFIED_LOBBY_REQUEST_TYPE,
+                        body, extended ? sizeof(body) : 8, nullptr, 0))
             bytes = ReadListFrame(fd, &type, reply, sizeof(reply), timeout_ms, &page->status);
         ::close(fd);
         if (!AppointmentBackendCurrent(route)) {
@@ -2839,7 +3017,8 @@ namespace ams::mitm::lanywhere {
         }
         if (bytes < 0) return;
         if (type == T_Error && bytes >= 1) {
-            if (regional && reply[0] == 4) {
+            if (regional_wire && reply[0] == 4) {
+                if (community_aware && !request.offset && !request.snapshot) RememberDirectoryRegions(route, 0);
                 page->status = ListStatusUpdate;
                 return;
             }
@@ -2847,11 +3026,17 @@ namespace ams::mitm::lanywhere {
             return;
         }
         page->status = ListStatusProtocol;
-        if (type != (regional ? REGIONAL_LOBBY_RESPONSE_TYPE : UNIFIED_LOBBY_RESPONSE_TYPE) ||
+        if (type != (regional_wire ? REGIONAL_LOBBY_RESPONSE_TYPE : UNIFIED_LOBBY_RESPONSE_TYPE) ||
             bytes < UNIFIED_LOBBY_HEADER_SIZE) return;
         const u32 snapshot = le32(reply), next = le32(reply + 4);
         const size_t count = reply[8];
-        const u8 available = reply[9], total = reply[10], status = reply[11];
+        const u8 available = reply[9], total = reply[10];
+        const u8 ready = extended ? reply[11] & REGIONAL_WIRE_ENABLED_MASK : 0;
+        const u8 status = reply[11] & ~ready;
+        const bool europe_ready = has_europe && (extended ? (ready & REGIONAL_WIRE_EU_ENABLED) != 0 : legacy_regional);
+        const bool community_ready = has_community && (ready & REGIONAL_WIRE_COMMUNITY_ENABLED);
+        if (((ready & REGIONAL_WIRE_EU_ENABLED) && !has_europe) ||
+            ((ready & REGIONAL_WIRE_COMMUNITY_ENABLED) && !has_community)) return;
         if (available > total || count > UNIFIED_LOBBY_PAGE_SIZE ||
             static_cast<size_t>(bytes) != UNIFIED_LOBBY_HEADER_SIZE + count * sizeof(UnifiedGroup)) return;
         if (status == UnifiedWireStale) {
@@ -2867,10 +3052,12 @@ namespace ams::mitm::lanywhere {
             auto &group = row.group;
             const char *end = static_cast<const char *>(std::memchr(row.provider, 0, sizeof(row.provider)));
             const bool is_europe = end && !std::strcmp(row.provider, REGION_PROVIDER_EU);
-            const bool valid_address = is_europe ?
-                (regional && !row.reserved[6] &&
-                 std::memcmp(row.reserved, &europe.sin_addr.s_addr, 4) == 0 &&
-                 std::memcmp(row.reserved + 4, &europe.sin_port, 2) == 0) :
+            const bool is_community = end && !std::strcmp(row.provider, REGION_PROVIDER_COMMUNITY);
+            const sockaddr_in *expected = is_europe ? &europe : is_community ? &community : nullptr;
+            const bool valid_address = expected ?
+                ((is_europe ? europe_ready : community_ready) && !row.reserved[6] &&
+                 std::memcmp(row.reserved, &expected->sin_addr.s_addr, 4) == 0 &&
+                 std::memcmp(row.reserved + 4, &expected->sin_port, 2) == 0) :
                 std::all_of(std::begin(row.reserved), std::end(row.reserved), [](u8 v) { return v == 0; });
             if (!end || end == row.provider ||
                 !std::all_of(end, static_cast<const char *>(row.provider) + sizeof(row.provider), [](char c) { return c == 0; }) ||
@@ -2885,12 +3072,12 @@ namespace ams::mitm::lanywhere {
             }
             DiscoveryRoute row_route = route;
             util::Strlcpy(row_route.provider, is_europe ? "self" : row.provider, sizeof(row_route.provider));
-            if (is_europe) {
-                row_route.ipv4 = europe.sin_addr.s_addr;
-                row_route.port = europe.sin_port;
+            if (expected) {
+                row_route.ipv4 = expected->sin_addr.s_addr;
+                row_route.port = expected->sin_port;
             }
             if (!ResolveDiscoveryRoute(row_route, &server, provider) ||
-                (!std::strcmp(provider, "self") && group.game_id == UINT64_MAX) ||
+                ((expected || !std::strcmp(provider, "self")) && group.game_id == UINT64_MAX) ||
                 (std::strcmp(provider, "self") && group.room_access != RoomAccessNone)) {
                 std::memset(groups, 0, sizeof(UnifiedGroup) * UNIFIED_LOBBY_PAGE_SIZE);
                 return;
@@ -2901,6 +3088,11 @@ namespace ams::mitm::lanywhere {
             // Endpoint bytes belong only to the trusted server wire, never IPC.
             std::memset(row.reserved, 0, sizeof(row.reserved));
             groups[i] = row;
+        }
+        if (community_aware && !request.offset && !request.snapshot) {
+            const u32 enabled = (europe_ready ? 1u << RelayRegionEurope : 0) |
+                (community_ready ? 1u << RelayRegionCommunity : 0);
+            RememberDirectoryRegions(route, enabled);
         }
         *page = {static_cast<s32>(count), next, snapshot, available, total, ListStatusOk};
     }

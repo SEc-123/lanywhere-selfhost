@@ -50,15 +50,16 @@ def main():
         'STATUS': status,
         'VIEW': view,
         'PREDICATES': '\n'.join(function(source, signature) for signature in (
-            'static bool show_matching(', 'static bool supports_reserved(', 'static bool is_self_network(',
-            'static bool is_self_room_context(', 'static bool can_change_visibility(', 'static bool can_change_provider(', 'static bool can_change_host_region(', 'static bool can_share_game_password(',
+            'static bool show_matching(', 'static bool external_room_expired(', 'static bool supports_reserved(', 'static bool is_self_network(',
+            'static bool is_self_room_context(', 'static bool can_change_visibility(', 'static bool can_change_provider(', 'static bool can_change_host_region(', 'static u32 next_host_region(', 'static bool can_share_game_password(',
              'static LobbyRoomId room_password_target(', 'static bool can_enter_game_password(',
             'static bool appointment_entry_available(', 'static bool lobby_guide_available(')),
         'CLEAN_NICKNAME': function(source, 'static bool clean_nickname('),
         'PLUS': between(source, '        if (down & HidNpadButton_Plus)', '        u64 now = now_ms();', loop),
         'GUIDE_INPUT': function(source, 'static bool guide_input('),
         'FIND_APPOINTMENT_ROOMS': function(source, 'static void open_appointment_rooms('),
-        'SELECT_ROOM': function(source, 'static void select_room('),
+        'SELECT_ROOM': function(source, 'static const char *external_join_hint(') + '\n' +
+                       function(source, 'static void select_room('),
         'START_SCREEN': between(source, '    if (appointment_entry_available(&v)) appointments_open(thread_ok, false);',
                                 '    View last = {0};', loop),
         'GUIDE': between(source, '        if (guide_input(&v, down)) {', '        if (appointments_active()) {', loop) +

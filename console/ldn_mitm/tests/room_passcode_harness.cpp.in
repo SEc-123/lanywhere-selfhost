@@ -15,7 +15,9 @@ static std::atomic<u64> g_stream_epoch{0};
 static os::SdkMutex g_match_lock, g_room_lifecycle_lock;
 constexpr size_t MatchTicketSize = 16, MaxMembers = 8;
 constexpr u32 CapabilityMatch = 1;
-constexpr u8 T_Reserve = 0x09, T_Cancel = 0x0a, T_Reservation = 0x88;
+constexpr u8 T_Reserve = 0x09, T_Cancel = 0x0a, T_Reservation = 0x88, T_Ping = 5, T_Pong = 0x86;
+static Result ResultCommunityUnreachable() { return RELAY_COMMUNITY_UNREACHABLE_DESCRIPTION; }
+constexpr char CommunityUnreachable[] = "Community node is unreachable from this Switch.";
 constexpr s64 WaitForGameMs = 90'000, PollIntervalMs = 1000;
 constexpr const char *ConfigError = "invalid config";
 
@@ -58,6 +60,7 @@ using ::SetRoomAccess;
 using ::UnlockRoomAccess;
 using ::SelectUnifiedRoom;
 using ::GetRelayRegion;
+using ::GetRelayRegions;
 using ::SetRelayRegion;
 using ::LookupRegionalRoomPasscode;
 using ::UnlockRegionalRoomAccess;
@@ -79,6 +82,7 @@ public:
     Result UnlockGameRoom(RoomAccessUnlock unlock, sf::Out<u32> status);
     Result SelectUnifiedLobbyRoom(UnifiedRoomRequest request);
     Result GetRelayRegion(sf::Out<u32> region);
+    Result GetRelayRegions(sf::Out<u32> mask);
     Result SetRelayRegion(u32 region);
     Result GetRegionalRoomPasscode(RegionalPasscodeLookup lookup, sf::Out<RoomPasscodeReply> reply);
     Result UnlockRegionalGameRoom(RegionalAccessUnlock unlock, sf::Out<u32> status);
@@ -94,6 +98,7 @@ class PasscodeRelay {
     std::vector<std::vector<u8>> requests, reservations;
 public:
     u16 port = 0;
+    std::atomic<bool> reply_to_ping{true};
     explicit PasscodeRelay(std::vector<u8> payload = std::vector<u8>(32), u8 kind = ROOM_PASSCODE_RESPONSE_TYPE,
                            std::function<void()> before_reply = {}) {
         listener = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -125,6 +130,10 @@ public:
                         }
                         if (before_reply) before_reply();
                         response(fd, kind, payload);
+                    } else if (type == T_Ping) {
+                        assert(body.empty());
+                        if (!reply_to_ping) break;
+                        response(fd, T_Pong, {});
                     } else if (type == T_Caps) {
                         assert(body.empty());
                         std::vector<u8> flags(4);
@@ -508,6 +517,59 @@ int main() {
         assert(published.size()==2&&published[1].size()==NetworkInfoSize+8&&le64(published[1].data()+NetworkInfoSize)==77);
         guest(central.port);assert(SetRelayRegion(RelayRegionDefault)==0);
         g_test_eu_port=0;
+    }
+    {
+        PasscodeRelay central, community;
+        guest(central.port);
+        test_community_port = community.port;
+        DiscoveryRoute central_route{};
+        assert(CaptureAppointmentRoute(&central_route));
+        u32 mask = 0;
+        assert(ipc.GetRelayRegions({&mask})==0&&mask==(1u << RelayRegionDefault));
+        assert(SetRelayRegion(RelayRegionCommunity)!=0);
+        assert(ipc.SelectUnifiedLobbyRoom({42,"ABC234",REGION_PROVIDER_COMMUNITY,{}})!=0);
+        RememberDirectoryRegions(central_route, 1u << RelayRegionCommunity);
+        assert(ipc.GetRelayRegions({&mask})==0&&(mask&(1u << RelayRegionCommunity)));
+        community.reply_to_ping=false;
+        assert(ipc.SetRelayRegion(RelayRegionCommunity)==ResultCommunityUnreachable());
+        assert(GetRelayRegion()==RelayRegionDefault&&!std::strcmp(g_error,CommunityUnreachable));
+        assert(ipc.SelectUnifiedLobbyRoom({42,"ABC234",REGION_PROVIDER_COMMUNITY,{}})==ResultCommunityUnreachable());
+        assert(!g_selection.selection_epoch);
+        community.reply_to_ping=true;
+        assert(ipc.SetRelayRegion(RelayRegionCommunity)==0&&!g_error[0]);
+        assert(StartMatch(MatchMode::Quick,nullptr,nullptr,nullptr)!=0);
+        GameRoute host{}, search{};
+        assert(CaptureHostGameRoute(&host)&&CaptureGameRoute(&search));
+        assert(!std::strcmp(host.discovery.provider,REGION_PROVIDER_COMMUNITY)&&host.discovery.port==htons(community.port));
+        assert(!std::strcmp(search.discovery.provider,REGION_PROVIDER_COMMUNITY)&&search.discovery.port==htons(community.port));
+        config(central.port, "lanplay-nl", false);
+        assert(CaptureGameRoute(&search)&&search.discovery.public_enabled&&
+            !std::strcmp(search.discovery.provider,REGION_PROVIDER_COMMUNITY)&&search.discovery.port==htons(community.port));
+        config(central.port, "self");
+        g_directory_until_ms = SelectionNowMs(); // Two-minute launch still uses the selected endpoint.
+        assert(ipc.GetRelayRegions({&mask})==0&&!(mask&(1u<<RelayRegionCommunity)));
+        assert(CaptureHostGameRoute(&host)&&host.discovery.port==htons(community.port));
+        assert(GameRouteStillCurrent(search));
+        RememberDirectoryRegions(central_route, 1u << RelayRegionCommunity);
+        assert(ipc.GetRegionalRoomPasscode({lookup,RelayRegionCommunity,0},{&found})==0&&found.status==RoomPasscodeUnavailable);
+        assert(ipc.UnlockRegionalGameRoom({unlock,RelayRegionCommunity,0},{&status})==0&&status==RoomPasscodeUnavailable);
+        assert(ipc.SelectUnifiedLobbyRoom({UINT64_MAX,"ABC234",REGION_PROVIDER_COMMUNITY,{}})!=0);
+        assert(ipc.SetRelayRegion(RelayRegionDefault)==0);
+        assert(ipc.SelectUnifiedLobbyRoom({42,"ABC234",REGION_PROVIDER_COMMUNITY,{}})==0);
+        assert(CaptureGameRoute(&search)&&search.discovery.port==htons(community.port)&&
+               search.discovery.selected_game_id==42&&!std::strcmp(search.discovery.selected_code,"ABC234"));
+        assert(CaptureHostGameRoute(&host)&&host.discovery.port==htons(central.port));
+        RememberDirectoryRegions(central_route, 0);
+        assert(GameRouteStillCurrent(search));
+        assert(ipc.GetRelayRegions({&mask})==0&&!(mask&(1u << RelayRegionCommunity)));
+        assert(ipc.SelectUnifiedLobbyRoom({42,"ABC234",REGION_PROVIDER_COMMUNITY,{}})!=0);
+        CancelMatch();
+        g_state=RelayState::InRoom;g_recovering=true;
+        std::strcpy(g_room_provider,REGION_PROVIDER_COMMUNITY);
+        assert(ipc.GetRelayRegions({&mask})==0&&(mask&RELAY_REGION_COMMUNITY_ACTIVE));
+        g_recovering=false;g_state=RelayState::Idle;
+        assert(central.seen().empty()&&community.seen().empty());
+        std::puts("PASS IPC32 community hosting, direct exact selection, pinned intent and optional feature exclusions");
     }
     std::puts("PASS regional IPC28-31: direct EU exact/quick, scoped passwords, central appointments, pinned active room, A-B-A invalidation and Ready suppression");
     std::puts("PASS native IPC17–21/25: hidden/share/clear, denied and stale unlocks, binary grants, scoped matchmaking, no password in reservations, and legacy frames");

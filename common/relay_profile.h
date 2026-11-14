@@ -17,3 +17,12 @@
 #ifndef RELAY_PROFILE_EU_PORT
 #define RELAY_PROFILE_EU_PORT 11460
 #endif
+
+/* The directory must agree with this fixed upstream before it is offered.
+ * Set an empty address to disable optional direct community gameplay. */
+#ifndef RELAY_PROFILE_COMMUNITY_IPV4
+#define RELAY_PROFILE_COMMUNITY_IPV4 "129.38.114.182"
+#endif
+#ifndef RELAY_PROFILE_COMMUNITY_PORT
+#define RELAY_PROFILE_COMMUNITY_PORT 11460
+#endif

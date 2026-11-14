@@ -68,7 +68,7 @@ async function upstream(t, metadata, rows) {
                             return frame(socket, 0xa2, Buffer.concat([head, ...page]));
                         }
                         const groups = rows.map(data => Buffer.concat([data.subarray(0, 6),
-                            networkInfo([{ ip: 0x0a0d1234 }], 4)]));
+                            networkInfo([{ ip: 0x0a0d1234 }], 4, data.readBigUInt64LE(8))]));
                         frame(socket, 0x87, Buffer.concat([Buffer.from([groups.length]), ...groups]));
                     };
                     if (state.held) hold.push(answer);
@@ -102,7 +102,7 @@ async function upstream(t, metadata, rows) {
     };
 }
 
-async function launch(t, providers, { eu } = {}) {
+async function launch(t, providers, { eu, community = false } = {}) {
     const state = await fs.mkdtemp(path.join(os.tmpdir(), 'lanywhere-unified-'));
     const bootstrap = path.join(state, 'bootstrap.cjs');
     await fs.writeFile(bootstrap, `const gateway = require(${JSON.stringify(path.join(__dirname, 'upstream-gateway.js'))});
@@ -114,10 +114,12 @@ lobby.create = options => create({ ...options, now: () => performance.now() + ju
 require(${JSON.stringify(path.join(__dirname, 'server.js'))});`);
     const environment = { ...process.env };
     delete environment.LANYWHERE_EU_RELAY;
+    delete environment.LANYWHERE_ENABLE_COMMUNITY_DIRECT;
     const server = spawn(process.execPath, [bootstrap, '--port', '0'], {
         env: { ...environment, ...(eu ? { LANYWHERE_EU_RELAY: eu } : {}),
             LANYWHERE_STATE_DIR: state, LANYWHERE_STATS_PORT: '0', LANYWHERE_PUBLIC_PORT: '0',
             LANYWHERE_OPS_PORT: '0', LANYWHERE_LANPLAY_PORT: '0', LANYWHERE_SHUTDOWN_GRACE_MS: '0',
+            LANYWHERE_ENABLE_COMMUNITY_DIRECT: community ? '1' : '0',
             LANYWHERE_ENABLE_PUBLIC_UPSTREAM: '1', LANYWHERE_ENABLE_LANPLAY_UPSTREAM: '0',
             LANYWHERE_CONTROL_BIND_ADDRESS: '127.0.0.1', LANYWHERE_UDP_BIND_ADDRESS: '127.0.0.1' },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -147,16 +149,20 @@ require(${JSON.stringify(path.join(__dirname, 'server.js'))});`);
     return { peer, port, stop, jump: () => server.kill('SIGALRM'), output: () => output };
 }
 
-async function page(peer, offset = 0, snapshot = 0, regionalView = false) {
-    const request = Buffer.alloc(8);
+async function page(peer, offset = 0, snapshot = 0, regionalView = false, expected = null) {
+    const request = Buffer.alloc(expected ? regional.COMMUNITY_LOBBY_REQUEST_SIZE : 8);
     request.writeUInt32LE(offset);
     request.writeUInt32LE(snapshot, 4);
+    if (expected?.eu) regional.parseEndpoint(expected.eu).wire.copy(request, 8);
+    if (expected?.community) regional.parseEndpoint(expected.community).wire.copy(request, 15);
     peer.send(regionalView ? regional.REQUEST : UNIFIED, request);
     const replyType = regionalView ? regional.RESPONSE : UNIFIED_REPLY;
     const packet = await peer.receive(peer.frames, entry => [replyType, 0x85].includes(entry.type), 'unified page');
     assert.equal(packet.type, replyType, `unified page error: ${packet.body.toString()}`);
     const reply = packet.body;
-    const count = reply[8], available = reply[9], total = reply[10], status = reply[11];
+    const count = reply[8], available = reply[9], total = reply[10];
+    const flags = expected ? reply[11] & 0xc0 : 0;
+    const status = reply[11] & ~flags;
     assert(count <= 6 && available <= total && status <= 1);
     assert.equal(reply.length, 12 + count * UNIFIED_BYTES);
     const rows = [];
@@ -166,13 +172,13 @@ async function page(peer, offset = 0, snapshot = 0, regionalView = false) {
         assert(end > METADATA_BYTES && end <= 368);
         const provider = data.toString('ascii', METADATA_BYTES, end);
         const extra = data.subarray(369);
-        const endpoint = regionalView && provider === regional.PROVIDER ?
+        const endpoint = regionalView && [regional.PROVIDER, regional.COMMUNITY_PROVIDER].includes(provider) ?
             { host: [...extra.subarray(0, 4)].join('.'), port: extra.readUInt16BE(4) } : null;
         assert(endpoint ? extra[6] === 0 : !extra.some(Boolean));
         rows.push({ code: data.toString('ascii', 0, 6), game: data.readBigUInt64LE(8), count: data[32], max: data[33],
             access: data[35], provider, ...(endpoint ? { endpoint } : {}) });
     }
-    return { snapshot: reply.readUInt32LE(), next: reply.readUInt32LE(4), available, total, status, rows };
+    return { snapshot: reply.readUInt32LE(), next: reply.readUInt32LE(4), available, total, status, rows, ...(expected ? { flags } : {}) };
 }
 
 test('shared cold/warm unified generations preserve provider identity, stable paging, partial failures and legacy routing', {timeout: 15000}, async t => {
@@ -374,4 +380,122 @@ test('regional directory keeps legacy pages and room admission isolated across t
     central.jump();
     await until(async () => (await page(browser, 0, warm.snapshot, true)).status === 1,
         'expired regional snapshot');
+});
+
+
+test('public room listing negotiates a direct endpoint and leaves gameplay on the shared community relay', { timeout: 15000 }, async t => {
+    const community = await launch(t, []), eu = await launch(t, []);
+    const address = `127.0.0.1:${community.port}`, euAddress = `127.0.0.1:${eu.port}`;
+    const central = await launch(t, [{ id: 'lanywhere-public', host: '127.0.0.1', port: community.port,
+        adapterMetadata: true, maxConnections: 4 }], { community: true, eu: euAddress });
+    const browser = await central.peer('Central browser');
+    const host = await community.peer('Community host', true);
+    await host.create();
+    await host.publish(networkInfo([host], 2));
+    const regionalHost = await eu.peer('Europe host');
+    await regionalHost.create();
+    await regionalHost.publish(networkInfo([regionalHost], 2));
+
+    browser.send(0x0b);
+    assert.equal((await browser.frame(0x89)).readUInt32LE() & regional.COMMUNITY_LOBBY_CAPABILITY,
+        regional.COMMUNITY_LOBBY_CAPABILITY);
+    const expected = { eu: euAddress, community: address };
+    const cold = await page(browser, 0, 0, true, expected);
+    assert.equal(cold.flags, regional.EU_MATCH);
+    const listing = await until(async () => {
+        const result = await page(browser, 0, 0, true, expected);
+        return result.available === 3 ? result : null;
+    }, 'direct room listed with both services reachable');
+    assert.equal(listing.flags, regional.EU_MATCH | regional.COMMUNITY_MATCH);
+    assert.equal(listing.total, 3);
+    const direct = listing.rows.find(item => item.provider === regional.COMMUNITY_PROVIDER);
+    assert.deepEqual(direct, { code: host.code, game: GAME, count: 1, max: 2, access: 0,
+        provider: regional.COMMUNITY_PROVIDER, endpoint: { host: '127.0.0.1', port: community.port } });
+    assert.equal(listing.rows.filter(item => item.code === host.code && item.provider !== regional.PROVIDER).length, 1);
+    assert.equal((await page(browser, 0, cold.snapshot, true, expected)).flags, regional.EU_MATCH);
+    assert.equal((await page(browser, 0, listing.snapshot, true)).status, 1);
+    const legacy = await page(browser, 0, 0, true);
+    assert.deepEqual(legacy.rows.map(item => item.provider).sort(), ['lanywhere-public', regional.PROVIDER]);
+    const mismatch = await page(browser, 0, 0, true, { eu: euAddress, community: euAddress });
+    assert.equal(mismatch.flags, regional.EU_MATCH);
+    assert.equal(mismatch.snapshot, legacy.snapshot);
+    assert.deepEqual(mismatch.rows, legacy.rows);
+    const communityOnly = await page(browser, 0, 0, true, { community: address });
+    assert.equal(communityOnly.flags, regional.COMMUNITY_MATCH);
+    assert.deepEqual(communityOnly.rows, [direct]);
+
+    await central.stop(); // Discovery is complete. Neither gameplay peer depends on the directory.
+    const guest = await community.peer('Community guest', true);
+    await guest.join(direct.code, { game: direct.game });
+    guest.relay(host.index, 3, networkInfo([guest], 2).subarray(0x68, 0xa8));
+    assert.equal((await host.ldn(guest, 3)).readUInt32LE(), guest.ip);
+    const connected = networkInfo([host, guest], 2);
+    await host.publish(connected);
+    host.relay(guest.index, 4, connected);
+    assert.equal((await guest.ldn(host, 4))[0x67], 2);
+    await Promise.all([guest.register(), host.register()]);
+    await guest.sendGameData(host.ip, 'direct guest to host');
+    await host.gameData(guest, 'direct guest to host');
+    await host.sendGameData(guest.ip, 'direct host to guest');
+    await guest.gameData(host, 'direct host to guest');
+    guest.close();
+    const resumed = await community.peer('Community guest', true);
+    await resumed.resume(guest);
+    await resumed.register();
+    await host.sendGameData(resumed.ip, 'direct host after resume');
+    await resumed.gameData(host, 'direct host after resume');
+});
+
+test('community hosting readiness distinguishes an empty reachable listing from an unavailable upstream', { timeout: 15000 }, async t => {
+    const source = await upstream(t, false, []), slowSource = await upstream(t, false, []);
+    const central = await launch(t, [
+        { id: 'lanywhere-public', host: '127.0.0.1', port: source.port, adapterMetadata: true, maxConnections: 4 },
+        { id: 'slow-upstream', host: '127.0.0.1', port: slowSource.port, adapterMetadata: true, maxConnections: 4 },
+    ], { community: true });
+    const browser = await central.peer('Central browser');
+    const expected = { community: `127.0.0.1:${source.port}` };
+    const read = (id = 0) => page(browser, 0, id, true, expected);
+    source.release();
+    const ready = await until(async () => {
+        const result = await read();
+        return result.flags === regional.COMMUNITY_MATCH ? result : null;
+    }, 'empty community is ready');
+    assert.deepEqual(ready.rows, []);
+    assert.equal(ready.available, 2);
+    await until(() => slowSource.state.finds === 1, 'unrelated upstream still pending its first reply');
+    source.state.bad = true;
+    central.jump();
+    await until(async () => (await read()).available === 1, 'failed community source removed');
+    assert.equal((await read()).flags, 0);
+    assert.equal((await read(ready.snapshot)).flags, regional.COMMUNITY_MATCH);
+    source.state.bad = false;
+    central.jump();
+    await until(async () => (await read()).flags === regional.COMMUNITY_MATCH, 'community source recovers');
+    assert.equal(source.state.finds, 3);
+    assert.equal(slowSource.state.finds, 1, 'community refresh does not wait for slow providers');
+    await central.stop();
+    const restarted = await launch(t, [{ id: 'lanywhere-public', host: '127.0.0.1', port: source.port,
+        adapterMetadata: true, maxConnections: 4 }], { community: true });
+    const restartedBrowser = await restarted.peer('Restarted browser');
+    assert.equal((await page(restartedBrowser, 0, 0, true, expected)).flags, 0);
+    await until(async () => (await page(restartedBrowser, 0, 0, true, expected)).flags === regional.COMMUNITY_MATCH,
+        'community source revalidates after central restart');
+});
+
+
+test('an unresolved upstream LCID stays on the legacy route instead of failing the direct lobby page', { timeout: 15000 }, async t => {
+    const legacyIdentity = row('BBB234', 'Legacy identity');
+    legacyIdentity.writeBigUInt64LE(0xffffffffffffffffn, 8);
+    const source = await upstream(t, false, [row(SHARED_CODE, 'Resolved identity'), legacyIdentity]);
+    const central = await launch(t, [{ id: 'lanywhere-public', host: '127.0.0.1', port: source.port,
+        adapterMetadata: true, maxConnections: 4 }], { community: true });
+    const browser = await central.peer('Central browser');
+    source.release();
+    const listing = await until(async () => {
+        const result = await page(browser, 0, 0, true, { community: `127.0.0.1:${source.port}` });
+        return result.flags === regional.COMMUNITY_MATCH ? result : null;
+    }, 'mixed community listing');
+    assert.deepEqual(listing.rows.map(item => [item.code, item.provider]), [
+        [SHARED_CODE, regional.COMMUNITY_PROVIDER], ['BBB234', 'lanywhere-public'],
+    ]);
 });

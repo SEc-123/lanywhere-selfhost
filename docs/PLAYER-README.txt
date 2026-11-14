@@ -20,8 +20,9 @@ Switch Online — 玩家安装与使用 / Player Guide
 5. 外部房间使用来源服务器的联机规则。需要密码的自有房可在大厅先验证。
    只和附近主机联机时，可以在浮层关闭本地无线接管。
 
-如果大厅显示「建房地区」，房主可在游戏建房前选择中国或欧洲。
-访客选中房间后，会直接连接该房间所在的中继。欧洲房暂不触发约局开房提醒。
+大厅显示「建房线路」时，可在进游戏前按 Y 选择「自有网络」或可用的社区线路。
+选「社区 · LANywhere」开房后，双方 Switch 直连该节点。密码在游戏内使用。
+约局开房提醒和大厅共享密码用「自有网络」。
 
 宝可梦「连接交换」等双人搜索从游戏内发起。两台都开启 LANywhere 接管，
 使用本地通信，在游戏内输入相同连接码并开始寻找。双机交换仍待实测。
@@ -66,8 +67,9 @@ Requires an already working Atmosphère setup compatible with your console firmw
 5. External rooms follow their source network rules. Enter protected My server passwords in the lobby.
    To play directly with nearby consoles, turn off interception in the overlay.
 
-When Host region is available, choose China or Europe before hosting in-game.
-Selecting a room connects to its relay. Europe rooms do not trigger appointment alerts.
+When Hosting line is available, press Y before starting the game to choose My server or an available community line.
+On Community · LANywhere, both consoles connect to the community node. Use the password in the game.
+Use My server for appointment alerts and lobby password sharing.
 
 For in-game pairing such as Pokémon Link Trade, enable interception on both consoles.
 In the game, choose local communication, enter the same link code and start searching.

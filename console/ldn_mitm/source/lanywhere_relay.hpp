@@ -26,6 +26,7 @@ R_DEFINE_NAMESPACE_RESULT_MODULE(ams::mitm::lanywhere, 450);
 
 namespace ams::mitm::lanywhere {
 
+    R_DEFINE_ERROR_RESULT(CommunityUnreachable, RELAY_COMMUNITY_UNREACHABLE_DESCRIPTION);
     R_DEFINE_ERROR_RESULT(RelayFailed, 1);  // el motivo legible queda en Status::error
 
     constexpr size_t CodeLength = 6;
@@ -98,10 +99,11 @@ namespace ams::mitm::lanywhere {
     };
     static_assert(sizeof(UnifiedGroup) == UNIFIED_LOBBY_GROUP_SIZE);
     static_assert(offsetof(UnifiedGroup, provider) == sizeof(GroupSummaryV2));
-    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity, bool regional = false);
+    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity, bool regional = false, bool community_aware = false);
     Result SelectUnifiedRoom(const UnifiedRoomRequest &request);
     // Preference for subsequent game host/search/quick match; resets on module restart.
     u32 GetRelayRegion();
+    u32 GetRelayRegions();
     Result SetRelayRegion(u32 region);
 
     struct GroupPageV2 { s32 count; u32 next, capabilities, reserved; };

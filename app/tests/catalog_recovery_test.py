@@ -51,6 +51,7 @@ static u64 now_ms(void) { return clock_ms; }
 static const GameInfo *game_info(u64 id) { queried=id; return have_local && id==local.id ? &local : NULL; }
 static int lanywhere_status(LanywhereStatus *out) { *out=observed;return !ipc_ok; }
 static int lanywhere_match_status(LobbyMatch *out) { *out=(LobbyMatch){0};return 0; }
+static u32 lanywhere_host_regions(u32 caps) { (void)caps; return 0; }
 ''' + code + r'''
 int main(int argc, char **argv)
 {

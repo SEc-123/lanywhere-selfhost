@@ -199,9 +199,10 @@ static Result lanywhere_match_status(LobbyMatch *out)
 
 static bool lanywhere_host_region(u32 *region)
 {
-    return relay_config_ipv4_valid(RELAY_PROFILE_EU_IPV4) &&
+    return (relay_config_ipv4_valid(RELAY_PROFILE_EU_IPV4) ||
+            relay_config_ipv4_valid(RELAY_PROFILE_COMMUNITY_IPV4)) &&
         R_SUCCEEDED(serviceDispatchOut(&g_lanywhere, RELAY_REGION_IPC_GET, *region)) &&
-        *region <= RelayRegionEurope;
+        *region <= RelayRegionCommunity;
 }
 
 static Result lanywhere_set_host_region(u32 region)
@@ -252,31 +253,44 @@ static bool unified_ipc_missing(Result result)
     return result == MAKERESULT(10, 221); // Atmosphère CMIF UnknownCommandId.
 }
 
+static u32 lanywhere_host_regions(u32 lobby_capabilities)
+{
+    u32 regions = 0;
+    const Result rc = serviceDispatchOut(&g_lanywhere, RELAY_REGIONS_IPC_GET, regions);
+    if (R_SUCCEEDED(rc)) return regions;
+    if (unified_ipc_missing(rc) && (lobby_capabilities & REGIONAL_LOBBY_CAPABILITY) &&
+        relay_config_ipv4_valid(RELAY_PROFILE_EU_IPV4))
+        return 1u << RelayRegionEurope;
+    return 0;
+}
+
 static bool unified_list_requires_fallback(Result rc, UnifiedPage page)
 {
     return unified_ipc_missing(rc) || (R_SUCCEEDED(rc) && page.count == -1 &&
         page.next == UNIFIED_LOBBY_END && page.status == ListStatusUpdate);
 }
 
+enum LobbyDirectory { LobbyDirectoryUnified, LobbyDirectoryRegional, LobbyDirectoryCommunity };
+
 static LobbyPage lanywhere_list_unified(UnifiedRoomsRequest request, LobbyGroup *groups, LobbySource *sources,
-                                        UnifiedPage *info, enum LobbyDiscovery *discovery, bool *regional)
+                                        UnifiedPage *info, enum LobbyDiscovery *discovery, enum LobbyDirectory *directory)
 {
     LobbyUnifiedGroup rows[LOBBY_PAGE_SIZE] = {0};
     UnifiedPage page = {.count = -1, .next = UNIFIED_LOBBY_END, .status = ListStatusNetwork};
     Result rc;
-    if (*regional) {
-        rc = serviceDispatchInOut(&g_lanywhere_list, REGIONAL_LOBBY_IPC_LIST, request, page,
+    while (*directory != LobbyDirectoryUnified) {
+        const u32 command = *directory == LobbyDirectoryCommunity ? COMMUNITY_LOBBY_IPC_LIST : REGIONAL_LOBBY_IPC_LIST;
+        rc = serviceDispatchInOut(&g_lanywhere_list, command, request, page,
             .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
             .buffers = { { rows, sizeof(rows) } });
-        if (unified_list_requires_fallback(rc, page)) {
-            *regional = false;
-            if (request.offset || request.snapshot)
-                return (LobbyPage){.count = -1, .next = LOBBY_PAGE_END, .reserved = UnifiedListStale};
-            memset(rows, 0, sizeof(rows));
-            page = (UnifiedPage){.count = -1, .next = UNIFIED_LOBBY_END, .status = ListStatusNetwork};
-        }
+        if (!unified_list_requires_fallback(rc, page)) break;
+        *directory = *directory == LobbyDirectoryCommunity ? LobbyDirectoryRegional : LobbyDirectoryUnified;
+        if (request.offset || request.snapshot)
+            return (LobbyPage){.count = -1, .next = LOBBY_PAGE_END, .reserved = UnifiedListStale};
+        memset(rows, 0, sizeof(rows));
+        page = (UnifiedPage){.count = -1, .next = UNIFIED_LOBBY_END, .status = ListStatusNetwork};
     }
-    if (!*regional) {
+    if (*directory == LobbyDirectoryUnified) {
         rc = serviceDispatchInOut(&g_lanywhere_list, UNIFIED_LOBBY_IPC_LIST, request, page,
             .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
             .buffers = { { rows, sizeof(rows) } });
@@ -290,17 +304,19 @@ static LobbyPage lanywhere_list_unified(UnifiedRoomsRequest request, LobbyGroup 
     if (R_FAILED(rc))
         return (LobbyPage){.count = -1, .next = LOBBY_PAGE_END, .reserved = ListStatusNetwork};
     *discovery = LobbyDiscoveryUnified;
-    if (!lobby_unified_page_valid(page, request, rows, LOBBY_PAGE_SIZE, *regional))
+    if (!lobby_unified_page_valid(page, request, rows, LOBBY_PAGE_SIZE, *directory != LobbyDirectoryUnified))
         return (LobbyPage){.count = -1, .next = LOBBY_PAGE_END, .reserved = ListStatusProtocol};
     *info = page;
     for (s32 i = 0; i < page.count; ++i) {
+        if (*directory != LobbyDirectoryCommunity && strcmp(rows[i].provider, REGION_PROVIDER_COMMUNITY) == 0)
+            return (LobbyPage){.count = -1, .next = LOBBY_PAGE_END, .reserved = ListStatusProtocol};
         groups[i] = rows[i].group;
         lobby_sanitize_group(&groups[i]);
         memcpy(sources[i], rows[i].provider, sizeof(sources[i]));
     }
     return (LobbyPage){.count = page.count, .next = page.next, .reserved = page.status,
         .capabilities = UNIFIED_LOBBY_CAPABILITY | LOBBY_CAP_RESERVED_MATCH | ROOM_PASSCODE_CAPABILITY |
-            ROOM_ACCESS_CAPABILITY | (*regional && page.count >= 0 ? REGIONAL_LOBBY_CAPABILITY : 0)};
+            ROOM_ACCESS_CAPABILITY | (*directory == LobbyDirectoryRegional && page.count >= 0 ? REGIONAL_LOBBY_CAPABILITY : 0)};
 }
 
 static LobbyPage lanywhere_list_appointment_rooms(u64 game_id, u32 offset, LobbyGroup *out, size_t count)
@@ -544,7 +560,8 @@ static void list_thread(void *arg)
     u64 next_query = 0;
     unsigned failures = 0;
     unsigned last_generation = 0;
-    bool regional = relay_config_ipv4_valid(RELAY_PROFILE_EU_IPV4);
+    enum LobbyDirectory directory = relay_config_ipv4_valid(RELAY_PROFILE_COMMUNITY_IPV4) ||
+        relay_config_ipv4_valid(RELAY_PROFILE_EU_IPV4) ? LobbyDirectoryCommunity : LobbyDirectoryUnified;
     for (;;) {
         mutexLock(&g_list_lock);
         const bool quit = g_quit;
@@ -587,7 +604,7 @@ static void list_thread(void *arg)
             page = lanywhere_list_groups(offset, groups, LOBBY_PAGE_SIZE);
         } else {
             page = lanywhere_list_unified((UnifiedRoomsRequest){.offset = offset, .snapshot = snapshot},
-                                         groups, sources, &unified, &discovery, &regional);
+                                         groups, sources, &unified, &discovery, &directory);
         }
         const u64 finished = now_ms();
         const u32 response_ms = page.count >= 0 ? (u32)(finished - started) : 0;
@@ -767,7 +784,7 @@ typedef struct {
     bool private_room, match_available;
     bool provider_panel, external_confirm, inventory_error;
     int provider_choice;
-    u32 host_region;
+    u32 host_region, host_regions;
     bool host_region_available;
     char nickname[33];
     char message[128];
@@ -792,11 +809,18 @@ static bool show_matching(const View *v)
     return v->match.mode != LobbyManual;
 }
 
+static bool external_room_expired(const View *v)
+{
+    return v->external_confirm && strcmp(v->pinned.provider, REGION_PROVIDER_COMMUNITY) == 0 &&
+        (v->match.state == MatchExpired || v->match.state == MatchError);
+}
+
 static bool supports_reserved(const View *v)
 {
     return v->config_state == RelayConfigReady &&
         (lobby_provider_is_self_relay(v->pinned.provider) ||
-         ((v->capabilities & LOBBY_CAP_RESERVED_MATCH) &&
+         ((v->host_region != RelayRegionCommunity || v->appointment_game_id) &&
+          (v->capabilities & LOBBY_CAP_RESERVED_MATCH) &&
           (v->discovery == LobbyDiscoveryUnified || v->appointment_game_id ||
            !lobby_provider_is_lanplay(v->config.provider))));
 }
@@ -815,6 +839,7 @@ static bool is_self_room_context(const View *v)
 static bool can_share_game_password(const View *v)
 {
     return v->status_valid && v->config_state == RelayConfigReady && is_self_room_context(v) &&
+        !(v->host_regions & RELAY_REGION_COMMUNITY_ACTIVE) &&
         (v->capabilities & (ROOM_PASSCODE_CAPABILITY | ROOM_ACCESS_CAPABILITY)) &&
         !v->provider_panel && !v->private_panel && !v->private_room && !show_matching(v) &&
         v->st.state == StateInRoom && v->st.my_index == 0 && v->st.game_id && v->st.code[0];
@@ -916,7 +941,7 @@ static const char *list_error_title(u32 status)
     case ListStatusTimeout: return TR("La red tarda en responder", "Network timed out");
     case ListStatusProtocol: return TR("Respuesta no compatible", "Unsupported response");
     case ListStatusConfig: return TR("Revisa los ajustes de red", "Check network settings");
-    case ListStatusPaused: return TR("Servidor pausado", "Relay paused");
+    case ListStatusPaused: return TR("Servidor pausado", "Lobby paused");
     case ListStatusUpdate: return TR("Actualización necesaria", "Update required");
     case ListStatusNetwork: return TR("Reconectando…", "Retrying connection…");
     default: return TR("Sin conexión", "Offline");
@@ -925,7 +950,7 @@ static const char *list_error_title(u32 status)
 
 static void status_pill(const View *v)
 {
-    const char *text = TR("Servidor disponible", "Relay reachable");
+    const char *text = TR("Servidor disponible", "Lobby online");
     u32 dot = C_OK;
     if (v->config_state == RelayConfigFileError || v->config_state == RelayConfigInvalid) {
         text = v->config_state == RelayConfigFileError ?
@@ -1076,7 +1101,8 @@ static const char *provider_label(int index)
 static const char *region_label(u32 region)
 {
     if (region == RelayRegionEurope) return ui_text("Europe");
-    return RELAY_PROFILE_FIXED ? ui_text("China") : ui_text("Default");
+    if (region == RelayRegionCommunity) return ui_text("Community · LANywhere");
+    return ui_text("My server");
 }
 
 static void group_card(int x, int y, int w, const LobbyGroup *g, const char *source, bool selected)
@@ -1113,8 +1139,8 @@ static void group_card(int x, int y, int w, const LobbyGroup *g, const char *sou
     gfx_text_fit(tx, y + 9, 23, C_TEXT, room_title(g, fallback, sizeof(fallback)), right - 190 - tx);
     char details[160];
     if (source && source[0]) {
-        const char *label = strcmp(source, REGION_PROVIDER_EU) == 0 ? region_label(RelayRegionEurope) :
-            provider_label(lobby_provider_index(source));
+        const char *label = strcmp(source, REGION_PROVIDER_COMMUNITY) == 0 ? region_label(RelayRegionCommunity) :
+            strcmp(source, REGION_PROVIDER_EU) == 0 ? region_label(RelayRegionEurope) : provider_label(lobby_provider_index(source));
         snprintf(details, sizeof(details), "%s · %s", label, host);
     } else
         snprintf(details, sizeof(details), "%s", host);
@@ -1228,7 +1254,9 @@ static const char *list_error_hint(u32 status, const char *provider)
         return TR("La lista se actualiza cuando vuelve la red.", "The list refreshes when the network returns.");
     case ListStatusBusy:
     case ListStatusTimeout:
-        return TR("Vuelve a intentarlo o cambia de red con LS.", "Try again, or choose another network with LS.");
+        return provider ?
+            TR("Vuelve a intentarlo o cambia de red con LS.", "Try again, or choose another network with LS.") :
+            ui_text("The lobby will retry automatically.");
     case ListStatusProtocol:
     case ListStatusUpdate:
         return TR("Actualiza la app y el complemento juntos.", "Update the app and plugin together.");
@@ -1242,11 +1270,16 @@ static const char *list_error_hint(u32 status, const char *provider)
 
 static void groups_column(const View *v)
 {
+    int x = MARGIN, y = 128;
+    if (v->external_confirm && strcmp(v->pinned.provider, REGION_PROVIDER_COMMUNITY) == 0) {
+        gfx_text(x, y, 28, C_TEXT, ui_text("Selected room"));
+        group_card(x, y + 52, LIST_W, &v->pinned_group, v->pinned.provider, false);
+        return;
+    }
     if (show_matching(v)) {
         matching_column(v);
         return;
     }
-    int x = MARGIN, y = 128;
     gfx_text(x, y, 28, C_TEXT, v->appointment_game_id ? ui_text("Game rooms") :
         v->discovery == LobbyDiscoveryUnified ? ui_text("All rooms") : TR("Grupos abiertos ahora", "Public rooms"));
     if (v->config_state == RelayConfigReady) {
@@ -1296,7 +1329,7 @@ static void groups_column(const View *v)
         gfx_round_rect(x, y, LIST_W, 170, 18, C_PANEL);
         gfx_text(x + 28, y + 30, 26, C_TEXT, list_error_title(v->list_status));
         gfx_text_fit(x + 28, y + 76, 20, C_DIM,
-                     list_error_hint(v->list_status, v->config.provider), LIST_W - 56);
+                     list_error_hint(v->list_status, v->discovery == LobbyDiscoveryLegacy ? v->config.provider : NULL), LIST_W - 56);
         return;
     }
     if (v->count == 0) {
@@ -1339,13 +1372,27 @@ static bool can_change_provider(const View *v)
 
 static bool can_change_host_region(const View *v)
 {
-    const bool regional_lobby = v->discovery == LobbyDiscoveryUnified &&
-        (v->capabilities & REGIONAL_LOBBY_CAPABILITY);
-    return v->host_region_available && (regional_lobby || v->host_region == RelayRegionEurope) &&
+    return v->host_region_available &&
+        ((v->host_regions & ((1u << RelayRegionEurope) | (1u << RelayRegionCommunity))) ||
+         v->host_region != RelayRegionDefault) &&
         v->status_valid && v->match_available && v->config_state == RelayConfigReady &&
         !v->appointment_game_id && !v->provider_panel && !v->private_panel && !v->private_room &&
         !v->external_confirm && !show_matching(v) &&
         (v->st.state == StateIdle || v->st.state == StateError);
+}
+
+static bool current_host_line_available(const View *v)
+{
+    return v->host_region == RelayRegionDefault || (v->host_regions & (1u << v->host_region)) != 0;
+}
+
+static u32 next_host_region(const View *v)
+{
+    if (v->host_region == RelayRegionDefault && (v->host_regions & (1u << RelayRegionCommunity)))
+        return RelayRegionCommunity;
+    if (v->host_region != RelayRegionEurope && (v->host_regions & (1u << RelayRegionEurope)))
+        return RelayRegionEurope;
+    return RelayRegionDefault;
 }
 
 static bool appointment_entry_available(const View *v)
@@ -1470,8 +1517,14 @@ static void side_column(const View *v)
     }
     if (can_change_host_region(v)) {
         gfx_round_rect(x, y, SIDE_W, 94, 18, C_PANEL);
-        gfx_text(x + 20, y + 12, 24, C_TEXT, ui_text("Host region"));
-        gfx_text(x + 20, y + 49, 24, C_CODE, region_label(v->host_region));
+        gfx_text(x + 20, y + 12, 24, C_TEXT, ui_text("Hosting line"));
+        if (current_host_line_available(v)) {
+            gfx_text_fit(x + 20, y + 49, 24, C_CODE, region_label(v->host_region), SIDE_W - 94);
+        } else {
+            char label[96];
+            snprintf(label, sizeof(label), ui_text("%s unavailable"), region_label(v->host_region));
+            gfx_text_fit(x + 20, y + 49, 19, C_WARN, label, SIDE_W - 94);
+        }
         gfx_button(x + SIDE_W - 62, y + 44, "Y", "");
         add_zone(x, y, SIDE_W, 94, HidNpadButton_Y);
         y += 110;
@@ -1575,7 +1628,9 @@ static void draw(const View *v)
         buttons[n] = "A"; labels[n++] = TR("Elegir", "Select");
         buttons[n] = "B"; labels[n++] = TR("Volver", "Back");
     } else if (v->external_confirm) {
-        if (local_game_info(&v->pinned_group)) { buttons[n] = "A"; labels[n++] = TR("Abrir juego", "Open game"); }
+        if (!external_room_expired(v) && local_game_info(&v->pinned_group)) {
+            buttons[n] = "A"; labels[n++] = TR("Abrir juego", "Open game");
+        }
         buttons[n] = "B"; labels[n++] = TR("Cancelar", "Cancel selection");
     } else if (show_matching(v)) {
         if (can_enter_game_password(v)) {
@@ -1763,6 +1818,8 @@ static void poll_lanywhere(View *v)
     } else {
         v->status_valid = false;
     }
+    if (v->host_region_available && v->status_valid)
+        v->host_regions = lanywhere_host_regions(v->capabilities);
     LobbyMatch match = {0};
     v->match_available = R_SUCCEEDED(lanywhere_match_status(&match)) && match.mode <= LobbyExact && match.state <= MatchError;
     if (v->match_available) {
@@ -1822,6 +1879,15 @@ static void start_quick(View *v)
     }
 }
 
+static const char *external_join_hint(const char *provider, bool installed)
+{
+    if (strcmp(provider, REGION_PROVIDER_COMMUNITY) == 0)
+        return installed ? ui_text("Press A to open the game, then search in Local Wireless.") :
+            ui_text("Open the game from HOME, then search in Local Wireless.");
+    return installed ? TR("Sala no reservada. Pulsa A para abrir el juego y buscar.", "Room not reserved. Press A to open the game and search.") :
+        TR("Abre el juego desde HOME y busca la sala; no está reservada.", "Open the game from HOME and search; this room is not reserved.");
+}
+
 static void select_room(View *v)
 {
     LobbyRoomId selection = v->selection;
@@ -1830,8 +1896,10 @@ static void select_room(View *v)
     if (legacy_external)
         snprintf(selection.provider, sizeof(selection.provider), "%s", v->config.provider);
     const bool routed = selection.provider[0] != '\0';
+    const bool community = strcmp(selection.provider, REGION_PROVIDER_COMMUNITY) == 0;
     const bool reserved = routed ? lobby_provider_is_self_relay(selection.provider) : supports_reserved(v);
     if (routed || reserved) {
+        if (community) draw_busy(ui_text("Checking community connection…"));
         Result result = routed ? lanywhere_select_unified(selection) : lanywhere_select(selection.code);
         if (routed && unified_ipc_missing(result)) {
             if (legacy_external) {
@@ -1842,7 +1910,10 @@ static void select_room(View *v)
             }
         }
         if (R_FAILED(result)) {
-            snprintf(v->message, sizeof(v->message), "%s", TR("No se pudo seleccionar la sala.", "Could not select that room."));
+            snprintf(v->message, sizeof(v->message), "%s",
+                result == MAKERESULT(450, RELAY_COMMUNITY_UNREACHABLE_DESCRIPTION) ?
+                ui_text("Could not connect to this community room.") :
+                TR("No se pudo seleccionar la sala.", "Could not select that room."));
             poll_lanywhere(v);
             return;
         }
@@ -1854,9 +1925,7 @@ static void select_room(View *v)
     v->message[0] = '\0';
     if (!reserved) {
         v->external_confirm = true;
-        const char *hint = local_game_info(&v->pinned_group) ?
-            TR("Sala no reservada. Pulsa A para abrir el juego y buscar.", "Room not reserved. Press A to open the game and search.") :
-            TR("Abre el juego desde HOME y busca la sala; no está reservada.", "Open the game from HOME and search; this room is not reserved.");
+        const char *hint = external_join_hint(selection.provider, local_game_info(&v->pinned_group) != NULL);
         snprintf(v->message, sizeof(v->message), "%s", hint);
     }
     if (selection.provider[0] || reserved) poll_lanywhere(v);
@@ -2025,6 +2094,8 @@ int main(int argc, char **argv)
             memset(&v.pinned_group, 0, sizeof(v.pinned_group));
             v.message[0] = '\0';
         }
+        if (external_room_expired(&v))
+            snprintf(v.message, sizeof(v.message), "%s", ui_text("Room selection expired. Press B and select again."));
         mutexLock(&g_list_lock);
         v.count = g_list_page.count;
         v.next_page = g_list_page.next;
@@ -2258,17 +2329,21 @@ int main(int argc, char **argv)
                     v.external_confirm = false; v.pinned = (LobbyRoomId){0};
                     memset(&v.pinned_group, 0, sizeof(v.pinned_group)); v.message[0] = '\0';
                 }
-            } else if (down & HidNpadButton_A) {
+            } else if ((down & HidNpadButton_A) && !external_room_expired(&v)) {
                 if (open_selected_game(&v)) break;
-                snprintf(v.message, sizeof(v.message), "%s", TR("Abre el juego desde HOME y busca la sala; no está reservada.", "Open the game from HOME and search; this room is not reserved."));
+                snprintf(v.message, sizeof(v.message), "%s", external_join_hint(v.pinned.provider, false));
             }
         } else if ((down & HidNpadButton_Y) && can_change_host_region(&v)) {
-            const u32 region = v.host_region == RelayRegionEurope ? RelayRegionDefault : RelayRegionEurope;
-            if (R_SUCCEEDED(lanywhere_set_host_region(region))) {
+            const u32 region = next_host_region(&v);
+            if (region == RelayRegionCommunity) draw_busy(ui_text("Checking community connection…"));
+            const Result result = lanywhere_set_host_region(region);
+            if (R_SUCCEEDED(result)) {
                 v.host_region = region;
                 v.message[0] = '\0';
             } else {
-                snprintf(v.message, sizeof(v.message), "%s", ui_text("Could not change host region."));
+                snprintf(v.message, sizeof(v.message), "%s",
+                    result == MAKERESULT(450, RELAY_COMMUNITY_UNREACHABLE_DESCRIPTION) ?
+                    ui_text("Could not connect to the community line.") : ui_text("Could not change hosting line."));
             }
         } else if ((down & HidNpadButton_Y) && can_share_game_password(&v)) {
             const char *message = room_password_edit(&g_lanywhere, v.st.code,
@@ -2373,6 +2448,7 @@ int main(int argc, char **argv)
         now = now_ms();
         if (thread_ok && down && update_room_password(&v, now)) dirty = true;
         bool status_changed = v.status_valid != last.status_valid || v.room_notice_visible != last.room_notice_visible ||
+                              v.host_region != last.host_region || v.host_regions != last.host_regions ||
                               v.st.state != last.st.state || v.st.member_count != last.st.member_count ||
                               strcmp(v.st.code, last.st.code) != 0 || strcmp(v.st.error, last.st.error) != 0 ||
                               v.match_available != last.match_available || memcmp(&v.match, &last.match, sizeof(v.match)) != 0;

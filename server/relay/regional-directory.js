@@ -5,6 +5,9 @@ const { RECORD_BYTES, parse } = require('./room-metadata');
 const { PAGE_SIZE, END } = require('./group-page');
 
 const PROVIDER = 'relay-eu', CAPABILITY = 8192, REQUEST = 0x2a, RESPONSE = 0xaa;
+const COMMUNITY_PROVIDER = 'relay-community', COMMUNITY_LOBBY_CAPABILITY = 16384;
+const LEGACY_REQUEST_BYTES = 8, COMMUNITY_LOBBY_REQUEST_SIZE = LEGACY_REQUEST_BYTES + 2 * 7;
+const EU_MATCH = 0x40, COMMUNITY_MATCH = 0x80;
 const FIND_META_PAGE = 0x22, META_PAGE = 0xa2, TIMEOUT_MS = 3000, MAX_PAGES = 24;
 const HEADER_BYTES = 5, MAX_FRAME_BYTES = 3 + HEADER_BYTES + PAGE_SIZE * RECORD_BYTES;
 
@@ -21,6 +24,16 @@ function parseEndpoint(value) {
     wire.set(octets);
     wire.writeUInt16BE(port, 4);
     return { host, port, wire };
+}
+
+function lobbyView(request, regionalEndpoint, communityEndpoint) {
+    if (request.length === LEGACY_REQUEST_BYTES)
+        return regionalEndpoint ? { includeRegion: true, includeCommunity: false, flags: 0 } : null;
+    if (request.length !== COMMUNITY_LOBBY_REQUEST_SIZE || !communityEndpoint) return null;
+    const includeRegion = Boolean(regionalEndpoint?.wire.equals(request.subarray(8, 15)));
+    const includeCommunity = communityEndpoint.wire.equals(request.subarray(15, 22));
+    const flags = includeRegion ? EU_MATCH : 0;
+    return { includeRegion, includeCommunity, flags };
 }
 
 function validSummary(row) {
@@ -103,4 +116,7 @@ function create(endpoint, { localAddress, sent = () => {} } = {}) {
     return { endpoint, query, shutdown: () => { closed = true; active?.(); } };
 }
 
-module.exports = { PROVIDER, CAPABILITY, REQUEST, RESPONSE, parseEndpoint, create };
+module.exports = {
+    PROVIDER, CAPABILITY, REQUEST, RESPONSE, COMMUNITY_PROVIDER, COMMUNITY_LOBBY_CAPABILITY,
+    COMMUNITY_LOBBY_REQUEST_SIZE, EU_MATCH, COMMUNITY_MATCH, parseEndpoint, lobbyView, create,
+};

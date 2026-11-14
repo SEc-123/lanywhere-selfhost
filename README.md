@@ -6,9 +6,9 @@ Play compatible Switch games' Local Wireless mode over the internet. Arrange a t
 
 1. On an Atmosphère Switch, merge the release ZIP into the SD root and restart. It replaces an existing ldn_mitm with the same module ID.
 2. Open **LANywhere Self-host** from Album. The app opens in Appointments. Press **A** to join or leave, **L** to create, **Y** to mark Ready and **X** to find rooms. Each appointment stays listed until two hours after its scheduled start.
-3. Press **B** to open the unified room lobby. Each room shows its source. Choose one, then search in the game's **Local Wireless** menu. New rooms use My server. Hosts can share or hide their room password.
+3. Press **B** to open the unified room lobby. Each room shows its source. Choose one, then search in the game's **Local Wireless** menu. New rooms default to **My server**. Hosts there can share or hide their room password.
 
-When a Europe relay is configured, use **Host region** in the lobby before opening a room in-game. Guests select the room as usual and connect to its relay. [Regional configuration and verification](docs/distribution/REGIONAL-RELAYS.md)
+When **Community · LANywhere** is available, press **Y** in the lobby to choose it before hosting in the game. Guests select the room as usual. Both Switch consoles connect to the community node for gameplay. Use **My server** for appointment alerts and lobby-managed passwords.
 
 Press **RS** to switch between English and Chinese. Choose **View guide** in the app for the controls. The overlay requires a compatible Tesla or Ultrahand setup. In-game room alerts require Ultrahand with API notifications enabled. [Pack and store integration](docs/distribution/INTEGRATORS.md).
 
@@ -20,7 +20,7 @@ Beta. Version 0.5.7 passed a physical Switch boot, appointment-button and reboot
 
 - Run `bash scripts/build-container.sh --embedded` to build the Switch app, sysmodule and overlay with the [pinned toolchain](scripts/toolchain/README.md).
 - Run `npm start` with Node.js 22 or later. Forward TCP and UDP 11460. [Deployment guide](docs/DEPLOY.zh-CN.md).
-- To target your own relay, edit [the relay profile](common/relay_profile.h) before building.
+- To target your own relay, edit [the connection profile](common/relay_profile.h) before building. See [community and regional configuration](docs/distribution/REGIONAL-RELAYS.md).
 
 ## Credits
 
@@ -36,4 +36,4 @@ Development assisted by OpenAI Codex. Portions of the code were AI-generated.
 
 按 **RS** 切换中英文，应用右下角可查看教程。兼容的 Tesla 或 Ultrahand 可显示 LANywhere 浮层。宝可梦连接交换等双人配对可在两台主机的游戏内输入相同连接码后开始本地通信搜索。0.5.7 为测试版，已通过 Switch 实机启动、约局按键及重启验证，双机交换仍待验证。
 
-配置欧洲中继后，房主可在大厅选择「建房地区」，再到游戏里建房。访客只需选房，游戏连接和重连都跟随该房间的中继。
+「社区 · LANywhere」可用时，在大厅按 **Y** 选择建房线路，再到游戏里用「本地无线」创建。访客照常选房，双方 Switch 直连同一个社区节点。需要约局提醒或在大厅共享密码时，选择「自有网络」。

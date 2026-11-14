@@ -7,6 +7,7 @@
 #include "relay_config.h"
 #define TR(es,en) (en)
 #define ui_text(s) (s)
+#define MAKERESULT(module, description) ((module) | ((description) << 9))
 #define ListConnecting (-1)
 #define ListUnavailable (-2)
 #define HidNpadButton_AnyDown (1ULL << 15)
@@ -43,11 +44,13 @@ static bool g_guide_open, g_zh, g_es, g_language_save_failed;
 static atomic_bool g_inventory_running;
 static int g_guide_page;
 static LobbyRoomId g_touched_room;
-static bool accept_code = true, save_ok = true, launch_ok = true;
+static bool accept_code = true, save_ok = true, launch_ok = true, node_reachable = true;
 static Result lanywhere_set_host_region(u32 region)
 {
-    assert(region <= RelayRegionEurope);
+    assert(region <= RelayRegionCommunity);
     calls.set_region++;
+    if (region == RelayRegionCommunity && !node_reachable)
+        return MAKERESULT(450, RELAY_COMMUNITY_UNREACHABLE_DESCRIPTION);
     return save_ok ? 0 : 1;
 }
 static unsigned checks;
@@ -155,7 +158,7 @@ static u64 touch_button(void) {return touch_action_at(1130,680);}
 /* SOURCE_NO_SERVICE */
 
 static View lobby(void) {
-    memset(&calls,0,sizeof(calls)); g_guide_open=false;g_guide_page=0;appointment_screen=appointment_list=false;g_zh=false;g_language_save_failed=false;atomic_store(&g_inventory_running,false);accept_code=true;save_ok=true;launch_ok=true;
+    memset(&calls,0,sizeof(calls)); g_guide_open=false;g_guide_page=0;appointment_screen=appointment_list=false;g_zh=false;g_language_save_failed=false;atomic_store(&g_inventory_running,false);accept_code=true;save_ok=true;launch_ok=true;node_reachable=true;
     View v={0};v.sel=-1;v.discovery=LobbyDiscoveryLegacy;route_result=0;v.config_state=RelayConfigReady;v.config.public_groups=true;v.match_available=true;v.status_valid=true;v.capabilities=LOBBY_CAP_RESERVED_MATCH;v.next_page=LOBBY_PAGE_END;
     strcpy(v.config.provider,"self");
     return v;
@@ -291,11 +294,11 @@ int main(void) {
     step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionDefault);checked();
     v.host_region_available=true;
     step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionDefault);checked();
-    v.capabilities|=REGIONAL_LOBBY_CAPABILITY;
+    v.host_regions=1u << RelayRegionEurope;
     step(&v,HidNpadButton_Y);assert(calls.set_region==1&&v.host_region==RelayRegionEurope&&!v.message[0]);checked();
     save_ok=false;step(&v,HidNpadButton_Y);
-    assert(calls.set_region==2&&v.host_region==RelayRegionEurope&&!strcmp(v.message,"Could not change host region."));checked();
-    v.capabilities &= ~REGIONAL_LOBBY_CAPABILITY;
+    assert(calls.set_region==2&&v.host_region==RelayRegionEurope&&!strcmp(v.message,"Could not change hosting line."));checked();
+    v.host_regions=0;
     save_ok=true;step(&v,HidNpadButton_Y);assert(v.host_region==RelayRegionDefault&&calls.set_region==3);checked();
     calls.set_region=0;
     v.st.state=StateConnecting;
@@ -304,6 +307,37 @@ int main(void) {
     v.match.game_id=2;strcpy(v.match.room,"XYZ987");v.host_region=RelayRegionEurope;
     step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionEurope);checked();
     assert(!strcmp(room_password_target(&v).provider,REGION_PROVIDER_EU));checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnified;v.host_region_available=true;
+    v.host_regions=1u << RelayRegionCommunity;
+    node_reachable=false;step(&v,HidNpadButton_Y);
+    assert(calls.set_region==1&&v.host_region==RelayRegionDefault&&
+           !strcmp(v.message,"Could not connect to the community line."));checked();
+    node_reachable=true;
+    step(&v,HidNpadButton_Y);
+    assert(calls.set_region==2&&v.host_region==RelayRegionCommunity&&v.discovery==LobbyDiscoveryUnified&&calls.page==0);checked();
+    step(&v,HidNpadButton_L);assert(!calls.quick);checked();
+    v.host_regions|=1u << RelayRegionEurope;
+    step(&v,HidNpadButton_Y);assert(v.host_region==RelayRegionEurope);checked();
+    step(&v,HidNpadButton_Y);assert(v.host_region==RelayRegionDefault);checked();
+    choose(&v);strcpy(v.sources[0],REGION_PROVIDER_COMMUNITY);
+    v.selection=lobby_room_id_on(&v.groups[0],v.sources[0]);
+    route_result=MAKERESULT(450, RELAY_COMMUNITY_UNREACHABLE_DESCRIPTION);
+    step(&v,HidNpadButton_A);
+    assert(!v.external_confirm&&calls.select_route==1&&
+           !strcmp(v.message,"Could not connect to this community room."));checked();
+    route_result=0;
+    step(&v,HidNpadButton_A);
+    assert(v.external_confirm&&calls.select_route==2&&!calls.select&&
+           !strcmp(selected_route.provider,REGION_PROVIDER_COMMUNITY)&&v.host_region==RelayRegionDefault&&
+           !strcmp(v.message,"Press A to open the game, then search in Local Wireless."));checked();
+    v.match.state=MatchExpired;step(&v,HidNpadButton_A);assert(!calls.launch);checked();
+    step(&v,HidNpadButton_B);assert(calls.cancel==1&&!v.external_confirm);checked();
+    v.host_regions=RELAY_REGION_COMMUNITY_ACTIVE;
+    v.st=(LanywhereStatus){.state=StateInRoom,.game_id=1,.code="ABC234"};
+    v.capabilities|=ROOM_ACCESS_CAPABILITY;
+    step(&v,HidNpadButton_Y);assert(!calls.share_password);checked();
+    v.host_regions=0;
+    step(&v,HidNpadButton_Y);assert(calls.share_password==1);checked();
     v=lobby();v.discovery=LobbyDiscoveryUnified;v.host_region_available=true;
     choose(&v);strcpy(v.sources[0],REGION_PROVIDER_EU);
     v.selection=lobby_room_id_on(&v.groups[0],v.sources[0]);v.groups[0].room_access=RoomAccessHidden;

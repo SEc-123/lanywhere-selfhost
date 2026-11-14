@@ -59,6 +59,7 @@ prelude = r'''
 #include <poll.h>
 #include "tcp_stream_proxy.hpp"
 #include "list_status.h"
+#include "regional_relay.h"
 using u8=uint8_t;using u16=uint16_t;using u32=uint32_t;using u64=uint64_t;using s32=int32_t;using s64=int64_t;
 static_assert(sizeof(u8)==1&&sizeof(u16)==2&&sizeof(u32)==4&&sizeof(u64)==8);
 namespace os {
@@ -141,10 +142,12 @@ pieces += [function('bool SendFrameTo('), function('void EnqueueControl('), func
 # QueryCapabilities and Handshake below remain unchanged production functions.
 pieces += [r'''
 static u32 offered_caps=0;static int cap_error=0,read_stage=0;static unsigned connects=0;static u8 room_error=0;static const char*room_error_text="";
+static std::vector<u8> direct_reply;
 static int ConnectServer(const sockaddr_in&,const char**,int,const char*,u32*,u64){connects++;return 61;}
 static ssize_t ReadFrame(int,u8 *type,u8 *body,size_t capacity,int){
  if(read_stage++==0){if(cap_error){*type=T_Error;body[0]=static_cast<u8>(cap_error);return 1;}assert(capacity>=4);*type=T_CapsReply;put32(body,offered_caps);return 4;}
  if(room_error){*type=T_Error;body[0]=room_error;const size_t n=std::strlen(room_error_text);assert(n+1<=capacity);std::memcpy(body+1,room_error_text,n);return n+1;}
+ if(!direct_reply.empty()){assert(capacity>=direct_reply.size());*type=T_Room;std::memcpy(body,direct_reply.data(),direct_reply.size());return direct_reply.size();}
  assert(capacity>=24);std::memset(body,0,24);*type=T_Room;std::memcpy(body,"ABC234",6);put32(body+7,g_my_ip);put32(body+11,1234);return 24;
 }
 static bool UdpSendTo(int,const sockaddr_in&,u32,u8,const void*,size_t){return true;}
@@ -154,7 +157,8 @@ static ssize_t UdpReceiveFrom(int,const sockaddr_in&,u8 *body,size_t){
 ''', function('ssize_t ReadListFrame('),
     'bool QueryCapabilities(int fd,u32 *flags,int timeout_ms=MatchIoTimeoutMs,u32 *status=nullptr);',
     function('bool QueryCapabilities(int fd, u32 *flags, int timeout_ms, u32 *status) {'),
-    function('bool ApplyTcpAdmissionFeatures('),
+    'constexpr u32 LanPlayNet = 0x0a0d0000, VirtualNet = 0x0a720000; constexpr size_t CodeLength = 6;',
+    function('bool ApplyTcpAdmissionFeatures('), function('bool ValidCommunityRoom('),
     function('int RemainingIoMs('), function('bool Handshake('), r'''
 #undef send
 #undef shutdown
@@ -315,6 +319,51 @@ int main(){
  assert(!Handshake(endpoint,T_Resume,resume,sizeof(resume),&expired,5000,"lanywhere-public",55000)&&expired.no_seat);checks++;
  ResetMocks();cap_error=0;read_stage=0;room_error=7;room_error_text="previous connection is active";Session busy{};
  assert(!Handshake(endpoint,T_Resume,resume,sizeof(resume),&busy,5000,"self",55000)&&!busy.no_seat);checks++;room_error=0;
+ {
+  const auto room=[]{
+   std::vector<u8> reply(24+37);
+   std::memcpy(reply.data(),"ABC234",6);
+   put32(reply.data()+7,g_my_ip);
+   put32(reply.data()+11,1234);
+   put64(reply.data()+15,42);
+   reply[23]=1;
+   put32(reply.data()+25,g_my_ip);
+   return reply;
+  };
+  u8 create[41]{},join[47]{},resume[10]{};
+  put64(create,42);create[40]=3;
+  std::memcpy(join,"ABC234",6);put64(join+38,42);join[46]=3;
+  put32(resume,1234);std::memcpy(resume+4,"ABC234",6);
+  sockaddr_in endpoint{};
+  for(u8 type:{T_Create,T_Join,T_Resume}) {
+   const u8 *data=type==T_Create?create:type==T_Join?join:resume;
+   const size_t size=type==T_Create?sizeof(create):type==T_Join?sizeof(join):sizeof(resume);
+   ResetMocks();direct_reply=room();cap_error=4;read_stage=0;Session real{};
+   assert(Handshake(endpoint,type,data,size,&real,5000,REGION_PROVIDER_COMMUNITY));
+   assert(!std::strcmp(real.provider,REGION_PROVIDER_COMMUNITY)&&!real.capabilities&&real.reply_size==61);
+   assert(writes.size()==2&&writes[0].bytes[2]==T_Caps&&writes[1].bytes[2]==type);
+   if(type!=T_Resume)assert(writes[1].bytes.back()==Features);
+   checks++;
+  }
+  for(unsigned malformed=0;malformed<8;++malformed) {
+   ResetMocks();direct_reply=room();read_stage=0;
+   switch(malformed) {
+    case 0: direct_reply[0]='I';break;
+    case 1: put32(direct_reply.data()+11,0);break;
+    case 2: direct_reply[6]=8;break;
+    case 3: direct_reply[23]=2;break;
+    case 4: put32(direct_reply.data()+25,0x01010101);break;
+    case 5: put32(direct_reply.data()+7,0x0a0d0202);break;
+    case 6: direct_reply[0]='D';break;
+    case 7: put64(direct_reply.data()+15,43);break;
+   }
+   Session bad{};
+   assert(!Handshake(endpoint,T_Join,join,sizeof(join),&bad,5000,REGION_PROVIDER_COMMUNITY));
+   assert(!std::strcmp(bad.error,"Community node returned an invalid room."));
+   checks++;
+  }
+  direct_reply.clear();
+ }
  proxy.reset();std::printf("Actual relay/Proxy glue: %u epoch, failure, ingress, SYNC-order and negotiation scenarios passed.\n",checks);
 }
 ''']

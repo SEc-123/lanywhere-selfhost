@@ -95,10 +95,11 @@ def main():
         put(fixture, module + 'toolbox.json', b'{}')
         nro = bytearray(0x80); nro[0x10:0x14] = b'NRO0'; struct.pack_into('<I', nro, 0x18, len(nro))
         address = '203.0.113.10'
-        put(fixture, 'app/lanywhere.nro', nro + address.encode('ascii') + b'\0')
+        community = package.optional_profile('COMMUNITY')[0].encode('ascii') + b'\0'
+        put(fixture, 'app/lanywhere.nro', nro + address.encode('ascii') + b'\0' + community)
         overlay_path = 'switch/.overlays/lanywhere.ovl'
         put(fixture, 'console/out/sd/' + overlay_path, nro)
-        put(fixture, 'console/ldn_mitm/ldn_mitm.elf', b'test\0' + address.encode('ascii') + b'\0')
+        put(fixture, 'console/ldn_mitm/ldn_mitm.elf', b'test\0' + address.encode('ascii') + b'\0' + community)
         entries = package.package_files('fixture', None, 11460, (address, 11460))
         assert len(entries) == 23, f'expected 23 files, found {len(entries)}'
         assert entries[overlay_path] == nro
@@ -110,6 +111,7 @@ def main():
         assert 'do not delete or replace the whole existing atmosphere folder' in guide
         assert 'top-right language control' in guide
         assert 'right stick (RS)' in guide and 'selection is remembered' in guide
+        assert 'Community · LANywhere' in guide and '社区 · LANywhere' in guide
         assert all(name in guide for name in examples)
         assert entries['GAMES.txt'].decode('utf-8') == game_text
         archive = fixture / 'result/player.zip'
@@ -130,8 +132,8 @@ def main():
             assert 'Europe relay profile' in str(error)
         else:
             raise AssertionError('A configured profile accepted binaries without the Europe endpoint')
-        put(fixture, 'app/lanywhere.nro', nro + address.encode('ascii') + b'\0' + europe)
-        put(fixture, 'console/ldn_mitm/ldn_mitm.elf', address.encode('ascii') + b'\0' + europe)
+        put(fixture, 'app/lanywhere.nro', nro + address.encode('ascii') + b'\0' + europe + community)
+        put(fixture, 'console/ldn_mitm/ldn_mitm.elf', address.encode('ascii') + b'\0' + europe + community)
         assert set(package.package_files('fixture', None, 11460, (address, 11460))) == set(entries)
     print(f'Player package: 23 files including the overlay and catalog license, preserved config, CRC verified; {len(listed)} candidate titles')
 

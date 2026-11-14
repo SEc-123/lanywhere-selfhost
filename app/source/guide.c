@@ -5,10 +5,10 @@
 typedef struct { const char *title, *steps[3], *key; } GuidePage;
 static const GuidePage pages_zh[] = {
     { "创建房间", {
-        "在游戏里进入“本地无线”。",
-        "创建房间后，会列在统一大厅的「自有网络」。",
-        "游戏需要密码时，在 LANywhere 按 Y 修改。"
-    }, "也可以在游戏内用 LANywhere 浮层修改密码。" },
+        "开房前可在大厅按 Y 切换线路。默认使用自有网络。",
+        "回到游戏，在“本地无线”里创建房间。",
+        "房间会按线路列在统一大厅。"
+    }, "社区线路使用游戏内密码。约局开房提醒请用自有网络。" },
     { "加入房间", {
         "在大厅按 A 选房，线路按房间来源自动切换。",
         "打开对应游戏，进入“本地无线”。",
@@ -37,10 +37,10 @@ static const GuidePage pages_zh[] = {
 };
 static const GuidePage pages_en[] = {
     { "Host a room", {
-        "Open Local Wireless in your game.",
-        "Create a room. It appears in All rooms under My server.",
-        "If the game uses a password, press Y in LANywhere."
-    }, "The LANywhere overlay can edit the password while in-game." },
+        "Before hosting, press Y if a hosting line is shown. Default: My server.",
+        "Return to the game and create a room in Local Wireless.",
+        "Your room appears in All rooms under its hosting line."
+    }, "On Community, use the game's password. For room alerts, host on My server." },
     { "Join a room", {
         "Select with A. The lobby uses that room's source.",
         "Open the matching game and enter Local Wireless.",

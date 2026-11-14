@@ -94,14 +94,14 @@ def fixed_profile():
     return str(server_ipv4(address[1])), relay_port(port[1])
 
 
-def europe_profile():
+def optional_profile(name):
     profile = (ROOT / 'common/relay_profile.h').read_text(encoding='utf-8')
-    address = re.search(r'^#define RELAY_PROFILE_EU_IPV4\s+"([^"]*)"$', profile, re.MULTILINE)
+    address = re.search(rf'^#define RELAY_PROFILE_{name}_IPV4\s+"([^"]*)"$', profile, re.MULTILINE)
     if not address or not address[1]:
         return None
-    port = re.search(r'^#define RELAY_PROFILE_EU_PORT\s+(\d+)$', profile, re.MULTILINE)
+    port = re.search(rf'^#define RELAY_PROFILE_{name}_PORT\s+(\d+)$', profile, re.MULTILINE)
     if port is None:
-        raise ValueError('Missing port in the Europe relay profile')
+        raise ValueError(f'Missing port in the {name} relay profile')
     return str(server_ipv4(address[1])), relay_port(port[1])
 
 
@@ -122,14 +122,18 @@ def package_files(version, server, port, embedded):
         module = read_entry(ROOT / 'console/ldn_mitm/ldn_mitm.elf')
         if needle not in entries['switch/lanywhere.nro'] or needle not in module:
             raise ValueError('Rebuild both Switch binaries with the fixed relay profile before packaging')
-        europe = europe_profile()
-        if europe is not None:
-            if europe == embedded:
-                raise ValueError('The Europe relay must use its own endpoint')
-            needle = europe[0].encode('ascii') + b'\0'
+        used_endpoints = {embedded}
+        for key, label in [('EU', 'Europe'), ('COMMUNITY', 'community')]:
+            endpoint = optional_profile(key)
+            if endpoint is None:
+                continue
+            if endpoint in used_endpoints:
+                raise ValueError(f'The {label} relay must use its own endpoint')
+            used_endpoints.add(endpoint)
+            needle = endpoint[0].encode('ascii') + b'\0'
             if needle not in entries['switch/lanywhere.nro'] or needle not in module:
-                raise ValueError('Rebuild both Switch binaries with the Europe relay profile before packaging')
-    elif europe_profile() is not None:
+                raise ValueError(f'Rebuild both Switch binaries with the {label} relay profile before packaging')
+    elif optional_profile('EU') is not None:
         raise ValueError('Europe relay selection requires the managed fixed relay profile')
     elif server is not None:
         entries["lanywhere/config.ini"] = f"server={server}\nport={port}\npublic=1\n".encode("ascii")
@@ -159,7 +163,9 @@ def package_files(version, server, port, embedded):
         "加入约局后可收开房提醒。启动 Ultrahand 并开启 API 通知，在约局页查看连接状态。\n"
         "房主在那场约局按 Y 准备，再到同款游戏开公开房，可把房间关联到这场。\n"
         "在游戏内用“本地无线”建房。新房默认使用自有网络。\n"
-        "房主在主应用按 Y 设置游戏密码。隐藏密码时，房间仍可见，访客要先输入密码。\n"
+        "大厅显示“建房线路”时，可在启动游戏前按 Y 选可用社区线路。\n"
+        "在“社区 · LANywhere”开房和加入时，主机都直连该节点，密码在游戏内使用。\n"
+        "自有网络房主在主应用按 Y 设置游戏密码。隐藏密码时，房间仍可见，访客要先输入密码。\n"
         "同一大厅显示各线路的房间。按 A 选房后会使用该房间的线路，再回游戏搜索。\n"
         "宝可梦连接交换等双人配对直接在游戏内选本地通信，输入相同连接码，两台都开始寻找。\n"
         "所有人安装同一新版插件，尽量使用同一游戏版本。\n\n"

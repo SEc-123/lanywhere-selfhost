@@ -16,6 +16,7 @@ pieces = '\n'.join(routes.function(source, sig) for sig in (
     'static LobbyPage validate_group_page(', 'static LobbyPage lanywhere_list_groups(',
     'static bool unified_ipc_missing(', 'static bool unified_list_requires_fallback(', 'static LobbyPage lanywhere_list_unified(', 'static const char *list_error_title(',
     'static const char *network_offline_hint(', 'static const char *list_error_hint('))
+pieces = source[source.index('enum LobbyDirectory {'):source.index('static LobbyPage lanywhere_list_unified(')] + pieces
 # The typed result is committed under the same provider/generation guard as the records.
 thread = routes.function(source, 'static void list_thread(')
 assert thread.index('lobby_response_is_current(') < thread.index('g_list_page = page;')
@@ -43,17 +44,24 @@ static LobbyUnifiedGroup mock_rows[LOBBY_PAGE_SIZE];
 static int mock_result, mock_unified_result, legacy_calls, unified_calls;
 static int mock_regional_result, regional_calls;
 static UnifiedPage mock_regional;
+static int mock_community_result, community_calls;
+static UnifiedPage mock_community;
 static UnifiedRoomsRequest last_unified;
 
 static Result dispatch(unsigned command, const void *request, size_t request_size,
                        void *response, size_t response_size, Dispatch io)
 {
     assert(io.buffer_attrs[0] == (SfBufferAttr_HipcMapAlias | SfBufferAttr_Out));
-    if (command == UNIFIED_LOBBY_IPC_LIST || command == REGIONAL_LOBBY_IPC_LIST) {
+    if (command == UNIFIED_LOBBY_IPC_LIST || command == REGIONAL_LOBBY_IPC_LIST || command == COMMUNITY_LOBBY_IPC_LIST) {
         assert(request_size == sizeof(last_unified) && response_size == sizeof(mock_unified));
         assert(io.buffers[0].size == sizeof(mock_rows));
         memcpy(&last_unified, request, sizeof(last_unified));
         memcpy(io.buffers[0].pointer, mock_rows, sizeof(mock_rows));
+        if (command == COMMUNITY_LOBBY_IPC_LIST) {
+            memcpy(response, &mock_community, sizeof(mock_community));
+            ++community_calls;
+            return mock_community_result;
+        }
         if (command == REGIONAL_LOBBY_IPC_LIST) {
             memcpy(response, &mock_regional, sizeof(mock_regional));
             ++regional_calls;
@@ -110,7 +118,7 @@ int main(void) {
     UnifiedPage info={0};
     LobbySource sources[LOBBY_PAGE_SIZE]={{0}};
     const UnifiedRoomsRequest request={.offset=6,.snapshot=91};
-    bool regional=false;
+    enum LobbyDirectory regional=LobbyDirectoryUnified;
     int before=legacy_calls;
     mock_unified_result=MAKERESULT(3, 221); // Same description, different module. No fallback.
     assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==ListStatusNetwork);
@@ -143,13 +151,27 @@ int main(void) {
     const UnifiedRoomsRequest first={0};
     strcpy(mock_rows[1].provider, REGION_PROVIDER_EU);
     assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==ListStatusProtocol);
-    regional=true;
+    regional=LobbyDirectoryRegional;
     mock_regional=(UnifiedPage){.count=2,.next=UNIFIED_LOBBY_END,.snapshot=91,.available=4,.total=14};
     out=lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional);
     assert(out.count==2 && out.capabilities&REGIONAL_LOBBY_CAPABILITY && info.total==14);
     assert(!strcmp(sources[0],"self") && !strcmp(sources[1],REGION_PROVIDER_EU));
     assert(lobby_room_index_on(lobby_room_id_on(&groups[0],REGION_PROVIDER_EU),groups,sources,2)==1);
     assert(regional_calls==1 && regional);
+    strcpy(mock_rows[1].provider,REGION_PROVIDER_COMMUNITY);
+    assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==ListStatusProtocol);
+    regional=LobbyDirectoryCommunity;
+    mock_community=mock_regional;
+    assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).count==2 && community_calls==1);
+    assert(!strcmp(sources[1],REGION_PROVIDER_COMMUNITY));
+    mock_rows[1].group.room_access=RoomAccessHidden;
+    assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==ListStatusProtocol);
+    mock_rows[1].group.room_access=RoomAccessNone;
+    enum LobbyDirectory legacy_directory=LobbyDirectoryUnified;
+    assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&legacy_directory).reserved==ListStatusProtocol);
+    mock_community_result=MAKERESULT(10,221);
+    assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==UnifiedListStale);
+    assert(regional==LobbyDirectoryRegional);
     mock_regional_result=MAKERESULT(3,221);
     int before_unified=unified_calls;
     assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==ListStatusNetwork);
@@ -157,7 +179,7 @@ int main(void) {
     mock_regional_result=MAKERESULT(10,221);
     assert(lanywhere_list_unified(request,groups,sources,&info,&discovery,&regional).reserved==UnifiedListStale);
     assert(!regional && unified_calls==before_unified);
-    regional=true;
+    regional=LobbyDirectoryRegional;
     mock_regional_result=0;
     mock_regional=(UnifiedPage){.count=-1,.next=UNIFIED_LOBBY_END,.status=ListStatusUpdate};
     mock_unified=(UnifiedPage){.count=0,.next=UNIFIED_LOBBY_END,.snapshot=92,.available=1,.total=13};

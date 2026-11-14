@@ -7,11 +7,12 @@ const crypto = require('node:crypto');
 const { parse: parseMetadata, RECORD_BYTES } = require('./room-metadata');
 const streamProtocol = require('./tcp-stream-protocol');
 const { CAPABILITY: APPOINTMENT_PUSH_CAPABILITY } = require('./appointment-push');
-const { CAPABILITY: REGIONAL_LOBBY_CAPABILITY } = require('./regional-directory');
+const { CAPABILITY: REGIONAL_LOBBY_CAPABILITY, COMMUNITY_LOBBY_CAPABILITY } = require('./regional-directory');
 const MAGIC = 0x594e414c;
 const SELECT = 0x20, SELECTED = 0xa0, CAPS = 0x0b;
 const ROOM_PASSCODE_CAPABILITY = 512, ROOM_ACCESS_CAPABILITY = 1024, UNIFIED_LOBBY_CAPABILITY = 2048;
-const PUBLIC_PROVIDERS = Object.freeze([{ id: 'lanywhere-public', host: '129.38.114.182', port: 11460, maxConnections: 8, connectTimeoutMs: 8000, adapterMetadata: true }]);
+const PUBLIC_PROVIDER_ID = 'lanywhere-public';
+const PUBLIC_PROVIDERS = Object.freeze([{ id: PUBLIC_PROVIDER_ID, host: '129.38.114.182', port: 11460, maxConnections: 8, connectTimeoutMs: 8000, adapterMetadata: true }]);
 const codeValid = b => b.length === 6 && /^[A-HJ-NP-Z2-9]{6}$/.test(b.toString('latin1'));
 const publicIp = socket => (socket.remoteAddress || '').replace(/^::ffff:/, '');
 const virtualIp = ip => ((ip >>> 16) === 0x0a0d && (ip & 0xffff) !== 0 && (ip & 0xffff) !== 0xffff) ||
@@ -54,7 +55,7 @@ function create({ providers = [], send: sendFront, sendUdp, isLocalToken = () =>
         registry.set(p.id, { ...p, active: 0, rates: new Map() });
     }
     const selfOnlyCapabilities = ROOM_PASSCODE_CAPABILITY | ROOM_ACCESS_CAPABILITY | UNIFIED_LOBBY_CAPABILITY |
-        APPOINTMENT_PUSH_CAPABILITY | REGIONAL_LOBBY_CAPABILITY;
+        APPOINTMENT_PUSH_CAPABILITY | REGIONAL_LOBBY_CAPABILITY | COMMUNITY_LOBBY_CAPABILITY;
     const capabilities = p => ((p.capabilities || p.udpCaps || 0) & ~selfOnlyCapabilities) | (p.adapterMetadata ? 64 : 0);
     const routes = new Map(), localLocked = new WeakSet(), tokens = new Map();
     const lobbyQueries = new WeakMap();
@@ -579,4 +580,4 @@ function create({ providers = [], send: sendFront, sendUdp, isLocalToken = () =>
                 privateRooms: new Set(current.filter(r => r.gameId === 0n).map(r => r.providerId + ':' + r.code)).size };
         } };
 }
-module.exports = { create, createDiagnostics, PUBLIC_PROVIDERS, SELECT, SELECTED, ROOM_PASSCODE_CAPABILITY, ROOM_ACCESS_CAPABILITY, UNIFIED_LOBBY_CAPABILITY };
+module.exports = { create, createDiagnostics, PUBLIC_PROVIDER_ID, PUBLIC_PROVIDERS, SELECT, SELECTED, ROOM_PASSCODE_CAPABILITY, ROOM_ACCESS_CAPABILITY, UNIFIED_LOBBY_CAPABILITY };

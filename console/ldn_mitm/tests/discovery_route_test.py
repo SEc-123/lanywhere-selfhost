@@ -29,9 +29,24 @@ def function(source, signature):
 def selection_state(source):
     start = source.index('        constexpr u64 HostRouteEpoch')
     end = source.index('        // Called with g_lock held. A reserved match', start)
-    return ('#include "regional_relay.h"\n#ifndef RELAY_PROFILE_EU_IPV4\n#define RELAY_PROFILE_EU_IPV4 ""\n#endif\n#ifndef RELAY_PROFILE_EU_PORT\n#define RELAY_PROFILE_EU_PORT 11460\n#endif\n' + source[start:end]
+    return (profile_prelude() + community_endpoint_functions(source) + '\n' + source[start:end]
+            .replace('void RememberDirectoryRegions(', '[[maybe_unused]] void RememberDirectoryRegions(')
             .replace('void ClearSelectionLocked(', '[[maybe_unused]] void ClearSelectionLocked(')
             .replace('void SelectRouteLocked(', '[[maybe_unused]] void SelectRouteLocked('))
+
+
+def profile_prelude():
+    return ('#include "regional_relay.h"\n'
+            '#ifndef RELAY_PROFILE_EU_IPV4\n#define RELAY_PROFILE_EU_IPV4 ""\n#endif\n'
+            '#ifndef RELAY_PROFILE_EU_PORT\n#define RELAY_PROFILE_EU_PORT 11460\n#endif\n'
+            '#ifndef RELAY_PROFILE_COMMUNITY_IPV4\n#define RELAY_PROFILE_COMMUNITY_IPV4 "127.0.0.1"\n#endif\n'
+            '#ifndef RELAY_PROFILE_COMMUNITY_PORT\n#define RELAY_PROFILE_COMMUNITY_PORT 11460\n#endif\n')
+
+
+def community_endpoint_functions(source):
+    return '\n'.join(function(source, sig) for sig in [
+        'bool CommunityEndpoint(', 'bool TrustedCommunityEndpoint('])
+
 
 
 def main():
