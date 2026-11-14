@@ -41,7 +41,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	lanywhere
 APP_TITLE	:=	LANywhere Self-host
 APP_AUTHOR	:=	augustocco
-APP_VERSION	?=	0.5.7
+APP_VERSION	?=	0.5.8
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
