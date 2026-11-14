@@ -2,19 +2,17 @@
 
 [中文](#中文) · [Download](https://github.com/SEc-123/lanywhere-selfhost/releases/latest)
 
-Play compatible Switch games' Local Wireless mode over the internet. Arrange a time in advance without staying online in an open room. Join several appointments, mark yourself Ready near the start, then look for a room or get an Ultrahand alert when one opens. The relay pushes alerts for newly available rooms and catches up after reconnection.
+Play compatible Switch games' Local Wireless mode over the internet. Schedule a time and get a room alert when someone opens a room.
 
-1. On an Atmosphère Switch, merge the release ZIP into the SD root and restart. It replaces an existing ldn_mitm with the same module ID.
-2. Open **LANywhere Self-host** from Album. The app opens in Appointments. Press **A** to join or leave, **L** to create, **Y** to mark Ready and **X** to find rooms. Each appointment stays listed until two hours after its scheduled start.
-3. Press **B** to open the unified room lobby. Each room shows its source. Choose one, then search in the game's **Local Wireless** menu. New rooms default to **My server**. Hosts there can share or hide their room password.
+1. Merge the SD ZIP into the SD card root, restart Atmosphère, and open **LANywhere Self-host** from Album. The ZIP replaces an existing ldn_mitm with the same module ID.
+2. **Host.** Press **B** for the lobby. The default is **My server**. When **Hosting line** appears, press **Y** to select **Community · LANywhere** before creating a room in the game's **Local Wireless** menu.
+3. **Join.** Press **A** on a room. Use **Open game** when offered, or return to the game from HOME. Search in **Local Wireless**. The room's source determines the connection.
 
-When **Community · LANywhere** is available, press **Y** in the lobby to choose it before hosting in the game. Guests select the room as usual. Both Switch consoles connect to the community node for gameplay. Use **My server** for appointment alerts and lobby-managed passwords.
+On **Community · LANywhere**, both consoles connect directly to the public node. Use the game's password. **My server** supports appointment alerts and lobby password sharing. You can join listed Switch LAN Play rooms through My server.
 
-Press **RS** to switch between English and Chinese. Choose **View guide** in the app for the controls. The overlay requires a compatible Tesla or Ultrahand setup. In-game room alerts require Ultrahand with API notifications enabled. [Pack and store integration](docs/distribution/INTEGRATORS.md).
+On **Appointments**, use **A** to join or leave, **L** to create, **Y** to mark Ready and **X** to find rooms. In-game room alerts require Ultrahand with API notifications enabled. Press **RS** to switch languages, or choose **View guide** for help.
 
-For games such as Pokémon Link Trade, enter the same in-game link code and start the Local Wireless search on both consoles.
-
-Beta. Version 0.5.7 passed a physical Switch boot, appointment-button and reboot check. Two-console trade remains unverified. See the [game candidates](compatibility/PLAYER-GAMES.txt) and [validation scope](docs/distribution/VALIDATION.md). This project is independent of Nintendo.
+[Game candidates](compatibility/PLAYER-GAMES.txt) · [Validation status](docs/distribution/VALIDATION.md) · [Pack and store integration](docs/distribution/INTEGRATORS.md)
 
 ## Build and self-host
 
@@ -30,10 +28,14 @@ Development assisted by OpenAI Codex. Portions of the code were AI-generated.
 
 ## 中文
 
-支持兼容的 Switch 游戏通过「本地无线」跨网联机。玩家可以提前约时间，省去一直在线开房等人的麻烦。可同时参加多场约局，临近开场按 **Y** 标记准备，再按 **X** 找房。启用 Ultrahand 的 API 通知后，服务器会推送开房和空位提醒，断线重连后可补收。
+通过兼容 Switch 游戏的「本地无线」跨网联机。可以提前约时间，有人开房时收提醒。
 
-将 [发布页](https://github.com/SEc-123/lanywhere-selfhost/releases/latest) 的 SD 包解压合并到卡根目录，重启 Atmosphère 后从相册打开 **LANywhere Self-host**。安装会替换同模块 ID 的 ldn_mitm。默认进入约局首页，按 **A** 加入或退出，按 **L** 发起，开场后保留两小时。按 **B** 进入统一大厅，每张房卡会标明来源。选房后回游戏用「本地无线」搜索。新房默认使用自有网络，房主可选择公开或隐藏密码。
+1. 将[发布页](https://github.com/SEc-123/lanywhere-selfhost/releases/latest)的 SD 包解压合并到卡根目录，重启 Atmosphère，从相册打开 **LANywhere Self-host**。安装会替换同模块 ID 的 ldn_mitm。
+2. **建房。** 按 **B** 进大厅，默认用「自有网络」。如果显示「建房线路」，可在开房前按 **Y** 选「社区 · LANywhere」，再到游戏的「本地无线」里建房。
+3. **加入。** 在大厅按 **A** 选房，再按提示打开游戏，或从 HOME 回到游戏。在「本地无线」里搜索。连接跟随房间来源。
 
-按 **RS** 切换中英文，应用右下角可查看教程。兼容的 Tesla 或 Ultrahand 可显示 LANywhere 浮层。宝可梦连接交换等双人配对可在两台主机的游戏内输入相同连接码后开始本地通信搜索。0.5.7 为测试版，已通过 Switch 实机启动、约局按键及重启验证，双机交换仍待验证。
+「社区 · LANywhere」的双方直连同一个公共节点，密码在游戏里用。约局开房提醒和大厅密码分享用「自有网络」。大厅列出的 Switch LAN Play 房间可以通过自有网络加入。
 
-「社区 · LANywhere」可用时，在大厅按 **Y** 选择建房线路，再到游戏里用「本地无线」创建。访客照常选房，双方 Switch 直连同一个社区节点。需要约局提醒或在大厅共享密码时，选择「自有网络」。
+约局首页按 **A** 参加或退出、**L** 发起、**Y** 准备、**X** 找房。游戏内提醒需要 Ultrahand 开启 API 通知。按 **RS** 切换中英文，右下角可「查看教程」。
+
+[游戏候选清单](compatibility/PLAYER-GAMES.txt) · [验证记录](docs/distribution/VALIDATION.md)

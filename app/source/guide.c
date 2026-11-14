@@ -5,15 +5,15 @@
 typedef struct { const char *title, *steps[3], *key; } GuidePage;
 static const GuidePage pages_zh[] = {
     { "创建房间", {
-        "开房前可在大厅按 Y 切换线路。默认使用自有网络。",
+        "大厅显示“建房线路”时，按 Y 切换。默认自有网络。",
         "回到游戏，在“本地无线”里创建房间。",
         "房间会按线路列在统一大厅。"
-    }, "社区线路使用游戏内密码。约局开房提醒请用自有网络。" },
+    }, "社区 · LANywhere 双方直连。约局提醒请用自有网络。" },
     { "加入房间", {
         "在大厅按 A 选房，线路按房间来源自动切换。",
-        "打开对应游戏，进入“本地无线”。",
-        "搜索房间，按游戏提示加入。"
-    }, "受保护的房间先在大厅验证。游戏若再要求，输入相同密码。" },
+        "按提示打开游戏，或从 HOME 回游戏。",
+        "在“本地无线”里搜索房间并加入。"
+    }, "Switch LAN Play 房间通过自有网络加入。" },
     { "游戏内配对", {
         "两台都开启 LANywhere 的本地无线接管。",
         "在游戏里选本地通信，输入相同连接码。",
@@ -23,7 +23,7 @@ static const GuidePage pages_zh[] = {
         "“在大厅分享”会让选房的玩家看到密码。",
         "“隐藏密码”需要玩家向房主获取密码。",
         "留空并确认可清除大厅中的密码设置。"
-    }, "只隐藏密码。房间仍显示在大厅。" },
+    }, "大厅密码用于自有网络。社区线路的密码在游戏里输入。" },
     { "约局", {
         "打开应用即进入约局。大厅按十字键左可返回。",
         "选中约局按 A 加入或退出。按 L 发起新约局。",
@@ -33,19 +33,19 @@ static const GuidePage pages_zh[] = {
         "确认联网，尽量使用相同游戏版本。",
         "使用“本地无线”，别选游戏的官方在线模式。",
         "仍失败：退出游戏房间，再重新选择或创建。"
-    }, "来源暂不可用时，仍可查看其他来源的房间。" },
+    }, "社区线路连不上时，可切回自有网络。" },
 };
 static const GuidePage pages_en[] = {
     { "Host a room", {
-        "Before hosting, press Y if a hosting line is shown. Default: My server.",
+        "If Hosting line appears, press Y to switch. Default: My server.",
         "Return to the game and create a room in Local Wireless.",
         "Your room appears in All rooms under its hosting line."
-    }, "On Community, use the game's password. For room alerts, host on My server." },
+    }, "On Community · LANywhere, both consoles connect directly. Use My server for alerts." },
     { "Join a room", {
         "Select with A. The lobby uses that room's source.",
-        "Open the matching game and enter Local Wireless.",
-        "Search for rooms and follow the game's prompts."
-    }, "Unlock protected rooms in the lobby. Enter the same password in game if asked." },
+        "Open the game when prompted, or return to it from HOME.",
+        "Search in Local Wireless and join the room."
+    }, "Switch LAN Play rooms join through My server." },
     { "Pair in game", {
         "Enable LANywhere interception on both consoles.",
         "Choose local communication and enter the same link code.",
@@ -55,7 +55,7 @@ static const GuidePage pages_en[] = {
         "Share in lobby lets players see the password.",
         "Keep password hidden: players ask the host for it.",
         "Leave it blank to clear the lobby password setting."
-    }, "Hiding the password keeps the room visible in the lobby." },
+    }, "Lobby passwords are for My server. On Community, enter the password in the game." },
     { "Appointments", {
         "The app opens in Appointments. D-pad Left reopens it.",
         "A to join or leave a selected appointment. L to create.",
@@ -65,7 +65,7 @@ static const GuidePage pages_en[] = {
         "Check internet. Use the same game version where possible.",
         "Choose Local Wireless in the game's menu.",
         "Still stuck? Leave the in-game room, then choose or host again."
-    }, "Rooms from other sources still appear when a source is unavailable." },
+    }, "If Community is unreachable, switch to My server." },
 };
 
 enum { PageCount = sizeof(pages_zh) / sizeof(pages_zh[0]), Margin = 56, Footer = 648 };
