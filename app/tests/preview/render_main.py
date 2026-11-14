@@ -17,7 +17,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parent.parent / 'source'
 FUNCTIONS = ['tr_error', 'clean_nickname', 'button_mask', 'add_zone', 'draw_language_control', 'touch_action_at', 'show_matching', 'supports_reserved', 'is_self_network', 'can_enter_game_password', 'room_password_allows_launch', 'match_state_text', 'list_error_title', 'status_pill', 'seats',
-             'local_game_info', 'room_catalog_match', 'game_info_has_lcid', 'room_title', 'display_game_icon', 'room_title_note', 'provider_label', 'group_card', 'matching_column', 'network_offline_hint', 'list_error_hint', 'groups_column', 'can_change_visibility', 'can_change_provider', 'is_self_room_context', 'can_share_game_password', 'provider_column', 'private_column',
+             'local_game_info', 'room_catalog_match', 'game_info_has_lcid', 'room_title', 'display_game_icon', 'room_title_note', 'provider_label', 'region_label', 'group_card', 'matching_column', 'network_offline_hint', 'list_error_hint', 'groups_column', 'can_change_visibility', 'can_change_provider', 'can_change_host_region', 'is_self_room_context', 'can_share_game_password', 'provider_column', 'private_column',
              'appointment_entry_available', 'lobby_guide_available', 'side_column', 'draw_password_visibility', 'draw', 'draw_no_service']
 
 
@@ -117,7 +117,7 @@ static void save_capture_if_requested(void) { if (!gfx_save_png(output_path)) fa
     print(result.stdout, end='')
     paths = [SOURCE / name for name in ['main.c', 'gfx.c', 'gfx.h', 'ui_text.c', 'ui_text.h', 'guide.c', 'guide.h',
                                        'lobby_model.c', 'lobby_model.h', 'game_catalog.c', 'game_catalog.h', 'relay_config.h']]
-    paths.append(SOURCE.parent.parent / 'common/relay_profile.h')
+    paths += [SOURCE.parent.parent / 'common' / name for name in ['relay_profile.h', 'regional_relay.h']]
     paths += [HERE / 'main_fixture.inc', HERE / 'render_main.py', HERE / 'host_switch.c', HERE / 'switch.h']
     report = {
         'scope': 'Unchanged main.c drawing functions plus actual gfx.c/ui_text.c, with declared sample rooms and game metadata',

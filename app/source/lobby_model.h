@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "../../common/list_status.h"
-#include "../../common/room_passcode.h"
+#include "../../common/regional_relay.h"
 #include "../../common/unified_lobby.h"
 
 #define LANYWHERE_IPC_MAJOR 5
@@ -91,7 +91,7 @@ int lobby_room_index(LobbyRoomId id, const LobbyGroup *groups, size_t count);
 int lobby_room_index_on(LobbyRoomId id, const LobbyGroup *groups, const LobbySource *providers, size_t count);
 bool lobby_room_equal(LobbyRoomId left, LobbyRoomId right);
 bool lobby_unified_page_valid(UnifiedPage page, UnifiedRoomsRequest request,
-                              const LobbyUnifiedGroup *rows, size_t capacity);
+                              const LobbyUnifiedGroup *rows, size_t capacity, bool regional);
 void lobby_sanitize_group(LobbyGroup *group);
 bool lobby_application_matches(const LobbyGroup *group, uint64_t local_application_id, const uint64_t local_lcids[8]);
 bool lobby_response_is_current(unsigned generation, uint32_t offset, const char *provider,
@@ -101,3 +101,4 @@ bool lobby_transport_error_is_stale(const char *message, int32_t lobby_count);
 const char *lobby_provider_id(int index);
 int lobby_provider_index(const char *provider);
 bool lobby_provider_is_lanplay(const char *provider);
+bool lobby_provider_is_self_relay(const char *provider);

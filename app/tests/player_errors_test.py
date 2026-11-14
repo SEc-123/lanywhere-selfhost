@@ -33,6 +33,7 @@ fixed_english = {
     'Fork network supports UDP payloads up to 1472 bytes', 'Fork network data queue is full',
     'Game TCP is unavailable on this network.', 'Legacy game TCP is unconfirmed.',
     'Reopen LANywhere to read game information.', 'Game network ID is not allowed.',
+    'regional lobby is not configured',
 }
 upstream = (root / 'server/relay/upstream-gateway.js').read_text(encoding='utf-8')
 fork = (root / 'server/relay/lanplay.js').read_text(encoding='utf-8')
@@ -81,4 +82,4 @@ with tempfile.TemporaryDirectory(prefix='switch-error-i18n-') as directory:
     assert translated('tipo unexpected desconocido') == 'tipo unexpected desconocido'
     assert translated('An unknown English error') == 'An unknown English error'
 
-print(f'Localized {len(static_server)} server errors, {len(native_errors)} native errors and {len(fixed_english)} fixed stream messages in English and Chinese')
+print(f'Localized {len(static_server)} server errors, {len(native_errors)} native errors and {len(fixed_english)} fixed English messages in English and Chinese')

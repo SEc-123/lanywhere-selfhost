@@ -9,7 +9,7 @@ static Mutex g_lock;
 static UEvent *g_wake;
 static unsigned g_generation;
 static bool g_queued, g_ready;
-static RoomPasscodeLookup g_lookup;
+static RegionalPasscodeLookup g_lookup;
 static RoomPasscodeReply g_reply;
 
 void room_password_init(UEvent *wake)
@@ -25,13 +25,16 @@ bool room_password_worker_exchange(Service *service)
         mutexUnlock(&g_lock);
         return false;
     }
-    const RoomPasscodeLookup lookup = g_lookup;
+    const RegionalPasscodeLookup lookup = g_lookup;
     const unsigned generation = g_generation;
     g_queued = false;
     mutexUnlock(&g_lock);
 
     RoomPasscodeReply reply = {.status = RoomPasscodeUnavailable};
-    if (R_FAILED(serviceDispatchInOut(service, ROOM_PASSCODE_IPC_GET, lookup, reply)))
+    const Result result = lookup.region == RelayRegionEurope ?
+        serviceDispatchInOut(service, REGIONAL_PASSCODE_IPC_GET, lookup, reply) :
+        serviceDispatchInOut(service, ROOM_PASSCODE_IPC_GET, lookup.lookup, reply);
+    if (R_FAILED(result))
         reply = (RoomPasscodeReply){.status = RoomPasscodeUnavailable};
 
     mutexLock(&g_lock);
@@ -90,8 +93,11 @@ bool room_password_tick(RoomPasswordView *view, LobbyRoomId target, bool known_l
         dirty = true;
     }
     if (target.game_id && !view->pending && now >= view->refresh_at) {
-        g_lookup = (RoomPasscodeLookup){.game_id = target.game_id};
-        memcpy(g_lookup.room, target.code, sizeof(g_lookup.room));
+        g_lookup = (RegionalPasscodeLookup){
+            .lookup = {.game_id = target.game_id},
+            .region = strcmp(target.provider, REGION_PROVIDER_EU) == 0 ? RelayRegionEurope : RelayRegionDefault,
+        };
+        memcpy(g_lookup.lookup.room, target.code, sizeof(g_lookup.lookup.room));
         g_queued = view->pending = true;
         wake = dirty = true;
     }
@@ -172,12 +178,18 @@ const char *room_password_unlock(Service *service, RoomPasswordView *view)
     if (!length) return ui_text("Enter the room password.");
     if (!valid_password(password, length)) return ui_text("Use up to 24 letters, numbers or symbols.");
 
-    RoomAccessUnlock unlock = {.game_id = view->room.game_id};
-    memcpy(unlock.room, view->room.code, sizeof(unlock.room));
-    memcpy(unlock.passcode, password, length);
+    RegionalAccessUnlock unlock = {
+        .unlock = {.game_id = view->room.game_id},
+        .region = strcmp(view->room.provider, REGION_PROVIDER_EU) == 0 ? RelayRegionEurope : RelayRegionDefault,
+    };
+    memcpy(unlock.unlock.room, view->room.code, sizeof(unlock.unlock.room));
+    memcpy(unlock.unlock.passcode, password, length);
     u32 status = RoomPasscodeUnavailable;
     view->unlocked = false;
-    if (R_FAILED(serviceDispatchInOut(service, ROOM_ACCESS_IPC_UNLOCK, unlock, status)))
+    const Result result = unlock.region == RelayRegionEurope ?
+        serviceDispatchInOut(service, REGIONAL_PASSCODE_IPC_UNLOCK, unlock, status) :
+        serviceDispatchInOut(service, ROOM_ACCESS_IPC_UNLOCK, unlock.unlock, status);
+    if (R_FAILED(result))
         return ui_text("Could not check the password. Try again.");
     if (status == RoomPasscodeWrong) return ui_text("Wrong game password. Try again.");
     if (status == RoomPasscodeRoomUnavailable) return ui_text("This game room is no longer available.");

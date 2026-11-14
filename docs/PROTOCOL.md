@@ -289,4 +289,20 @@ The source counts distinguish an empty result from an incomplete search.
 
 IPC 24 reads these rows. IPC 25 selects a provider-qualified room for the next
 in-game search. The relay connection retains that provider for the active room
-and reconnects on the same route. New game rooms use the self network.
+and reconnects on the same route. New game rooms use an owned relay.
+
+When `LANYWHERE_EU_RELAY` is configured, the hub advertises capability `8192`
+and accepts regional lobby request `0x2a`. Response `0xaa` uses the same
+sizes as the legacy lobby with an independent paging snapshot.
+A Europe room uses provider `relay-eu`. The last seven bytes of its wire row
+contain the IPv4 bytes, a big-endian port, and a zero byte. The app's
+sysmodule accepts the address only when it matches the configured Europe
+endpoint, then zeroes those bytes before returning the row through IPC 27.
+Other sources still use seven zero bytes.
+
+IPC 25 selects the regional room by source, game ID and room code. The
+sysmodule connects to its configured endpoint using the normal self protocol.
+IPC 28 reads the hosting region, and IPC 29 sets it while idle. IDs are
+0 for the default relay and 1 for Europe. IPC 30 and 31 look up and authorize
+room passwords using the same region ID. Active connections and reconnection
+retain the endpoint that admitted the member.

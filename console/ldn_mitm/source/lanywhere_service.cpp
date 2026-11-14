@@ -255,4 +255,31 @@ namespace ams::mitm::lanywhere {
         R_SUCCEED();
     }
 
+    Result LanywhereService::ListRegionalRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out) {
+        UnifiedPage result{-1, UNIFIED_LOBBY_END, 0, 0, 0, ListStatusProtocol};
+        if (out.GetSize() >= UNIFIED_LOBBY_PAGE_SIZE * sizeof(UnifiedGroup))
+            FindUnifiedRooms(request, &result, reinterpret_cast<UnifiedGroup *>(out.GetPointer()), out.GetSize() / sizeof(UnifiedGroup), true);
+        page.SetValue(result);
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::GetRelayRegion(sf::Out<u32> region) {
+        region.SetValue(lanywhere::GetRelayRegion());
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::SetRelayRegion(u32 region) {
+        R_RETURN(lanywhere::SetRelayRegion(region));
+    }
+
+    Result LanywhereService::GetRegionalRoomPasscode(RegionalPasscodeLookup lookup, sf::Out<RoomPasscodeReply> reply) {
+        reply.SetValue(LookupRegionalRoomPasscode(lookup));
+        R_SUCCEED();
+    }
+
+    Result LanywhereService::UnlockRegionalGameRoom(RegionalAccessUnlock unlock, sf::Out<u32> status) {
+        status.SetValue(UnlockRegionalRoomAccess(unlock));
+        R_SUCCEED();
+    }
+
 }

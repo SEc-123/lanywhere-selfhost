@@ -8,6 +8,8 @@ Play compatible Switch games' Local Wireless mode over the internet. Arrange a t
 2. Open **LANywhere Self-host** from Album. The app opens in Appointments. Press **A** to join or leave, **L** to create, **Y** to mark Ready and **X** to find rooms. Each appointment stays listed until two hours after its scheduled start.
 3. Press **B** to open the unified room lobby. Each room shows its source. Choose one, then search in the game's **Local Wireless** menu. New rooms use My server. Hosts can share or hide their room password.
 
+When a Europe relay is configured, use **Host region** in the lobby before opening a room in-game. Guests select the room as usual and connect to its relay. [Regional configuration and verification](docs/distribution/REGIONAL-RELAYS.md)
+
 Press **RS** to switch between English and Chinese. Choose **View guide** in the app for the controls. The overlay requires a compatible Tesla or Ultrahand setup. In-game room alerts require Ultrahand with API notifications enabled. [Pack and store integration](docs/distribution/INTEGRATORS.md).
 
 For games such as Pokémon Link Trade, enter the same in-game link code and start the Local Wireless search on both consoles.
@@ -33,3 +35,5 @@ Development assisted by OpenAI Codex. Portions of the code were AI-generated.
 将 [发布页](https://github.com/SEc-123/lanywhere-selfhost/releases/latest) 的 SD 包解压合并到卡根目录，重启 Atmosphère 后从相册打开 **LANywhere Self-host**。安装会替换同模块 ID 的 ldn_mitm。默认进入约局首页，按 **A** 加入或退出，按 **L** 发起，开场后保留两小时。按 **B** 进入统一大厅，每张房卡会标明来源。选房后回游戏用「本地无线」搜索。新房默认使用自有网络，房主可选择公开或隐藏密码。
 
 按 **RS** 切换中英文，应用右下角可查看教程。兼容的 Tesla 或 Ultrahand 可显示 LANywhere 浮层。宝可梦连接交换等双人配对可在两台主机的游戏内输入相同连接码后开始本地通信搜索。0.5.7 为测试版，已通过 Switch 实机启动、约局按键及重启验证，双机交换仍待验证。
+
+配置欧洲中继后，房主可在大厅选择「建房地区」，再到游戏里建房。访客只需选房，游戏连接和重连都跟随该房间的中继。

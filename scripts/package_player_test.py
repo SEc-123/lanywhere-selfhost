@@ -85,7 +85,7 @@ def main():
         fixture = pathlib.Path(td)
         package.ROOT = fixture
         package.SD_ROOT = fixture / 'console/out/sd'
-        for name in ('LICENSE', 'console/Atmosphere-libs/LICENSE', 'docs/PLAYER-README.txt',
+        for name in ('LICENSE', 'common/relay_profile.h', 'console/Atmosphere-libs/LICENSE', 'docs/PLAYER-README.txt',
                      'compatibility/PLAYER-GAMES.txt', 'compatibility/title-catalog/LICENSE.titledb'):
             put(fixture, name, (PROJECT / name).read_bytes())
         shutil.copytree(PROJECT / 'third_party', fixture / 'third_party')
@@ -119,6 +119,20 @@ def main():
             assert z.read('README.txt') == entries['README.txt']
             assert z.read('GAMES.txt') == entries['GAMES.txt']
             assert z.read(overlay_path) == nro
+
+        profile = fixture / 'common/relay_profile.h'
+        europe = b'45.132.15.1\0'
+        profile.write_text(profile.read_text().replace('RELAY_PROFILE_EU_IPV4 ""',
+                                                       'RELAY_PROFILE_EU_IPV4 "45.132.15.1"'))
+        try:
+            package.package_files('fixture', None, 11460, (address, 11460))
+        except ValueError as error:
+            assert 'Europe relay profile' in str(error)
+        else:
+            raise AssertionError('A configured profile accepted binaries without the Europe endpoint')
+        put(fixture, 'app/lanywhere.nro', nro + address.encode('ascii') + b'\0' + europe)
+        put(fixture, 'console/ldn_mitm/ldn_mitm.elf', address.encode('ascii') + b'\0' + europe)
+        assert set(package.package_files('fixture', None, 11460, (address, 11460))) == set(entries)
     print(f'Player package: 23 files including the overlay and catalog license, preserved config, CRC verified; {len(listed)} candidate titles')
 
 

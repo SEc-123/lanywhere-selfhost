@@ -226,7 +226,39 @@ namespace ams::mitm::lanywhere {
 
         // A card selection is a short-lived intent, separate from the saved network
         // and from the provider of an active room.
+        // All helpers in this block are called with g_lock held unless pure.
+        // The preference affects new gameplay only, never an installed room or central appointments.
         constexpr u64 HostRouteEpoch = UINT64_MAX;
+        u32 g_relay_region = RelayRegionDefault;
+        u64 g_gameplay_generation = 1;
+
+        bool EuropeEndpoint(sockaddr_in *out) {
+            *out = {};
+            out->sin_family = AF_INET;
+            if (!RELAY_PROFILE_EU_IPV4[0] || RELAY_PROFILE_EU_PORT < 1 || RELAY_PROFILE_EU_PORT > 65535)
+                return false;
+            out->sin_port = htons(RELAY_PROFILE_EU_PORT);
+            return ::inet_pton(AF_INET, RELAY_PROFILE_EU_IPV4, &out->sin_addr) == 1 &&
+                out->sin_addr.s_addr != INADDR_ANY && out->sin_addr.s_addr != INADDR_BROADCAST;
+        }
+
+        bool RegionEndpointLocked(u32 region, sockaddr_in *out) {
+            if (region == RelayRegionDefault) return LoadServer(out);
+            return region == RelayRegionEurope && LoadServer() && EuropeEndpoint(out);
+        }
+
+        bool TrustedSelfEndpointLocked(const DiscoveryRoute &route) {
+            if (std::strcmp(route.provider, "self")) return false;
+            sockaddr_in expected{};
+            if (RegionEndpointLocked(RelayRegionDefault, &expected) &&
+                expected.sin_addr.s_addr == route.ipv4 && expected.sin_port == route.port) return true;
+            return EuropeEndpoint(&expected) && expected.sin_addr.s_addr == route.ipv4 && expected.sin_port == route.port;
+        }
+
+        bool GameplayEndpointLocked(sockaddr_in *out) {
+            return RegionEndpointLocked(g_relay_region, out);
+        }
+
         constexpr u64 DefaultGameRouteEpoch = HostRouteEpoch - 1;
         constexpr u64 SelectionLifetimeMs = 180'000;
         DiscoveryRoute g_selection{};
@@ -252,14 +284,18 @@ namespace ams::mitm::lanywhere {
         bool PinnedRouteCurrentLocked(const DiscoveryRoute &route) {
             if (!route.selection_epoch) return false;
             sockaddr_in server{};
-            if (!LoadServer(&server) || server.sin_addr.s_addr != route.ipv4 || server.sin_port != route.port)
-                return false;
-            if (route.selection_epoch == HostRouteEpoch) return std::strcmp(route.provider, "self") == 0;
-            if (route.selection_epoch == DefaultGameRouteEpoch) {
+            if (route.selection_epoch == HostRouteEpoch || route.selection_epoch == DefaultGameRouteEpoch) {
+                if (route.gameplay_generation != g_gameplay_generation || !GameplayEndpointLocked(&server) ||
+                    server.sin_addr.s_addr != route.ipv4 || server.sin_port != route.port ||
+                    std::strcmp(route.provider, "self")) return false;
+                if (route.selection_epoch == HostRouteEpoch) return true;
                 return !g_selection.selection_epoch && g_public && route.public_enabled &&
-                    !route.selected_game_id && !route.selected_code[0] && std::strcmp(route.provider, "self") == 0;
+                    !route.selected_game_id && !route.selected_code[0];
             }
-            return route.selection_epoch == g_selection.selection_epoch &&
+            const bool endpoint_valid = !std::strcmp(route.provider, "self") ? TrustedSelfEndpointLocked(route) :
+                (LoadServer(&server) && server.sin_addr.s_addr == route.ipv4 && server.sin_port == route.port);
+            return endpoint_valid && route.ipv4 == g_selection.ipv4 && route.port == g_selection.port &&
+                route.selection_epoch == g_selection.selection_epoch &&
                 route.selected_game_id == g_selection.selected_game_id &&
                 std::memcmp(route.selected_code, g_selection.selected_code, sizeof(route.selected_code)) == 0 &&
                 std::strcmp(route.provider, g_selection.provider) == 0 &&
@@ -1144,8 +1180,12 @@ namespace ams::mitm::lanywhere {
         if (g_public) {
             // Games can alternate hosting and searching without a lobby card.
             // Unselected online searches use the same relay as automatic hosts.
+            if (!GameplayEndpointLocked(&server)) return false;
+            out->discovery.ipv4 = server.sin_addr.s_addr;
+            out->discovery.port = server.sin_port;
             util::Strlcpy(out->discovery.provider, "self", sizeof(out->discovery.provider));
             out->discovery.selection_epoch = DefaultGameRouteEpoch;
+            out->discovery.gameplay_generation = g_gameplay_generation;
         }
         return true;
     }
@@ -1157,12 +1197,13 @@ namespace ams::mitm::lanywhere {
         *out = {};
         sockaddr_in server{};
         std::scoped_lock lock(g_lock);
-        if (g_state == RelayState::Connecting || g_state == RelayState::InRoom || !LoadServer(&server)) return false;
+        if (g_state == RelayState::Connecting || g_state == RelayState::InRoom || !GameplayEndpointLocked(&server)) return false;
         out->discovery.ipv4 = server.sin_addr.s_addr;
         out->discovery.port = server.sin_port;
         out->discovery.public_enabled = true;
         util::Strlcpy(out->discovery.provider, "self", sizeof(out->discovery.provider));
         out->discovery.selection_epoch = HostRouteEpoch;
+        out->discovery.gameplay_generation = g_gameplay_generation;
         return true;
     }
 
@@ -1172,6 +1213,7 @@ namespace ams::mitm::lanywhere {
             CaptureHostGameRoute(&current) : CaptureGameRoute(&current);
         return captured && current.room_epoch == route.room_epoch && current.room_token == route.room_token &&
             current.discovery.selection_epoch == route.discovery.selection_epoch &&
+            current.discovery.gameplay_generation == route.discovery.gameplay_generation &&
             std::memcmp(current.room_code, route.room_code, CodeLength) == 0 &&
             current.discovery.ipv4 == route.discovery.ipv4 && current.discovery.port == route.discovery.port &&
             std::strcmp(current.discovery.provider, route.discovery.provider) == 0 &&
@@ -1448,7 +1490,11 @@ namespace ams::mitm::lanywhere {
                     return;
                 }
                 epoch = g_stream_epoch.load(); token = g_token;
-                push_capable = !std::strcmp(g_room_provider, "self") && (g_capabilities & APPOINTMENT_PUSH_CAPABILITY);
+                sockaddr_in central{};
+                const bool central_room = LoadServer(&central) && central.sin_addr.s_addr == g_server.sin_addr.s_addr &&
+                    central.sin_port == g_server.sin_port;
+                push_capable = central_room && !std::strcmp(g_room_provider, "self") &&
+                    (g_capabilities & APPOINTMENT_PUSH_CAPABILITY);
             }
             // A capable self relay needs host identity before its first publish
             // triggers a push. Preserve the historical ordering for older peers.
@@ -1635,9 +1681,13 @@ namespace ams::mitm::lanywhere {
             std::scoped_lock lk(g_lock);
             configured = LoadServer(&server, provider);
             if (!authorized_route && configured && std::strcmp(provider, "self")) return ResultRelayFailed();
-            if (authorized_route && (!configured || std::strcmp(authorized_route->provider, "self") ||
-                authorized_route->ipv4 != server.sin_addr.s_addr || authorized_route->port != server.sin_port))
-                return ResultRelayFailed();
+            if (authorized_route) {
+                if (!configured || !TrustedSelfEndpointLocked(*authorized_route)) return ResultRelayFailed();
+                server.sin_addr.s_addr = authorized_route->ipv4;
+                server.sin_port = authorized_route->port;
+            } else if (mode == MatchMode::Quick) {
+                configured = GameplayEndpointLocked(&server);
+            }
         }
         MatchTicket old{}, pending{};
         {
@@ -1646,13 +1696,15 @@ namespace ams::mitm::lanywhere {
                 std::scoped_lock lock(g_lock);
                 if (g_state == RelayState::InRoom || g_state == RelayState::Connecting) return ResultRelayFailed();
                 if (authorized_route) {
-                    sockaddr_in current{};
-                    if (!LoadServer(&current) || current.sin_addr.s_addr != authorized_route->ipv4 ||
-                        current.sin_port != authorized_route->port) return ResultRelayFailed();
+                    if (!TrustedSelfEndpointLocked(*authorized_route)) return ResultRelayFailed();
                     auto route = *authorized_route;
                     route.public_enabled = true;
                     SelectRouteLocked(route, code);
                 } else {
+                    sockaddr_in current{};
+                    if (mode == MatchMode::Quick && (!GameplayEndpointLocked(&current) ||
+                        current.sin_addr.s_addr != server.sin_addr.s_addr || current.sin_port != server.sin_port))
+                        return ResultRelayFailed();
                     ClearSelectionLocked();
                 }
             }
@@ -1696,6 +1748,27 @@ namespace ams::mitm::lanywhere {
         ReleaseTicket(pending);
     }
 
+    u32 GetRelayRegion() {
+        std::scoped_lock lock(g_lock);
+        return g_relay_region;
+    }
+
+    Result SetRelayRegion(u32 region) {
+        std::scoped_lock lifecycle(g_room_lifecycle_lock);
+        std::scoped_lock match_lock(g_match_lock);
+        std::scoped_lock lock(g_lock);
+        sockaddr_in endpoint{};
+        if (!RegionEndpointLocked(region, &endpoint) || g_state == RelayState::InRoom ||
+            g_state == RelayState::Connecting || g_recovering || ArmedLocked() || g_match.in_flight)
+            return ResultRelayFailed();
+        if (g_relay_region != region) {
+            do { ++g_gameplay_generation; } while (!g_gameplay_generation);
+            g_relay_region = region;
+        }
+        ClearSelectionLocked();
+        R_SUCCEED();
+    }
+
     Result SelectUnifiedRoom(const UnifiedRoomRequest &request) {
         const auto *provider_end = static_cast<const char *>(std::memchr(request.provider, 0, sizeof(request.provider)));
         if (!request.game_id || request.code[6] || request.code[7] || !ValidCode(request.code) ||
@@ -1709,11 +1782,13 @@ namespace ams::mitm::lanywhere {
             sockaddr_in server{};
             if (g_state == RelayState::InRoom || g_state == RelayState::Connecting || !LoadServer(&server))
                 return ResultRelayFailed();
+            const bool europe = !std::strcmp(request.provider, REGION_PROVIDER_EU);
+            if (europe && !EuropeEndpoint(&server)) return ResultRelayFailed();
             route.ipv4 = server.sin_addr.s_addr;
             route.port = server.sin_port;
             route.public_enabled = true;
             route.selected_game_id = request.game_id;
-            util::Strlcpy(route.provider, request.provider, sizeof(route.provider));
+            util::Strlcpy(route.provider, europe ? "self" : request.provider, sizeof(route.provider));
         }
         sockaddr_in endpoint{};
         char provider[33]{};
@@ -2292,6 +2367,23 @@ namespace ams::mitm::lanywhere {
             return CaptureAppointmentRoute(&current) && current.ipv4 == route.ipv4 && current.port == route.port;
         }
 
+        bool CaptureRegionalRoute(u32 region, DiscoveryRoute *out) {
+            std::scoped_lock lock(g_lock);
+            sockaddr_in endpoint{};
+            if (!RegionEndpointLocked(region, &endpoint)) return false;
+            *out = {};
+            out->ipv4 = endpoint.sin_addr.s_addr;
+            out->port = endpoint.sin_port;
+            out->public_enabled = true;
+            util::Strlcpy(out->provider, "self", sizeof(out->provider));
+            return true;
+        }
+
+        bool RegionalRouteCurrent(const DiscoveryRoute &route) {
+            std::scoped_lock lock(g_lock);
+            return TrustedSelfEndpointLocked(route);
+        }
+
         bool ValidAppointmentRequest(const AppointmentRequest &request) {
             const auto *b = reinterpret_cast<const u8 *>(&request);
             const u8 op = b[0];
@@ -2495,7 +2587,7 @@ namespace ams::mitm::lanywhere {
             const char *error = nullptr;
             const int fd = ConnectServer(server, &error, RoomPasscodeTimeoutMs, "self", nullptr, deadline);
             if (fd < 0) return unavailable;
-            const auto current = [&] { return host ? GameRouteStillCurrent(*host) : AppointmentBackendCurrent(route); };
+            const auto current = [&] { return host ? GameRouteStillCurrent(*host) : RegionalRouteCurrent(route); };
             RoomPasscodeReply reply{};
             u8 type = 0;
             ssize_t received = -1;
@@ -2551,14 +2643,16 @@ namespace ams::mitm::lanywhere {
         return ExchangeRoomPasscode(request, host.discovery, &host).status;
     }
 
-    u32 UnlockRoomAccess(const RoomAccessUnlock &unlock) {
+    u32 UnlockRegionalRoomAccess(const RegionalAccessUnlock &regional) {
+        if (regional.reserved) return RoomPasscodeInvalid;
+        const auto &unlock = regional.unlock;
         if (!ValidRoomPasscodeRoom(unlock.room) || !unlock.game_id || unlock.game_id == UINT64_MAX)
             return RoomPasscodeInvalid;
         const char *end = static_cast<const char *>(std::memchr(unlock.passcode, 0, ROOM_PASSCODE_MAX));
         const size_t length = end ? static_cast<size_t>(end - unlock.passcode) : ROOM_PASSCODE_MAX;
         if (!length || !ValidRoomPasscodeText(unlock.passcode, length)) return RoomPasscodeInvalid;
         DiscoveryRoute route{};
-        if (!CaptureAppointmentRoute(&route)) return RoomPasscodeUnavailable;
+        if (!CaptureRegionalRoute(regional.region, &route)) return RoomPasscodeUnavailable;
         route.selected_game_id = unlock.game_id;
         RoomPasscodeRequest request{};
         std::memcpy(request.room, unlock.room, CodeLength);
@@ -2573,16 +2667,26 @@ namespace ams::mitm::lanywhere {
             RoomPasscodeOk : RoomPasscodeRoomUnavailable;
     }
 
-    RoomPasscodeReply LookupRoomPasscode(const RoomPasscodeLookup &lookup) {
+    u32 UnlockRoomAccess(const RoomAccessUnlock &unlock) {
+        return UnlockRegionalRoomAccess({unlock, RelayRegionDefault, 0});
+    }
+
+    RoomPasscodeReply LookupRegionalRoomPasscode(const RegionalPasscodeLookup &regional) {
+        if (regional.reserved) return {RoomPasscodeInvalid, 0, {}, {}};
+        const auto &lookup = regional.lookup;
         if (!ValidRoomPasscodeRoom(lookup.room) || !lookup.game_id || lookup.game_id == UINT64_MAX)
             return {RoomPasscodeInvalid, 0, {}, {}};
         DiscoveryRoute route{};
-        if (!CaptureAppointmentRoute(&route)) return {RoomPasscodeUnavailable, 0, {}, {}};
+        if (!CaptureRegionalRoute(regional.region, &route)) return {RoomPasscodeUnavailable, 0, {}, {}};
         RoomPasscodeRequest request{};
         std::memcpy(request.room, lookup.room, CodeLength);
         request.operation = RoomPasscodeRead;
         request.game_id = lookup.game_id;
         return ExchangeRoomPasscode(request, route);
+    }
+
+    RoomPasscodeReply LookupRoomPasscode(const RoomPasscodeLookup &lookup) {
+        return LookupRegionalRoomPasscode({lookup, RelayRegionDefault, 0});
     }
 
     int FindGroupSummaries(u32 offset, GroupPageV2 *page, GroupSummaryV2 *groups, size_t capacity,
@@ -2691,7 +2795,9 @@ namespace ams::mitm::lanywhere {
     }
 
 
-    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity) {
+    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity, bool regional) {
+        sockaddr_in europe{};
+        regional = regional && EuropeEndpoint(&europe);
         *page = {-1, UNIFIED_LOBBY_END, 0, 0, 0, ListStatusProtocol};
         if (!groups || capacity < UNIFIED_LOBBY_PAGE_SIZE || (request.offset && !request.snapshot)) return;
         std::memset(groups, 0, sizeof(UnifiedGroup) * UNIFIED_LOBBY_PAGE_SIZE);
@@ -2711,8 +2817,9 @@ namespace ams::mitm::lanywhere {
             ::close(fd);
             return;
         }
-        if (!(caps & UNIFIED_LOBBY_CAPABILITY)) {
+        if (!(caps & (regional ? REGIONAL_LOBBY_CAPABILITY : UNIFIED_LOBBY_CAPABILITY))) {
             ::close(fd);
+            // A valid CAPS reply lacking the extension is explicit unsupported.
             page->status = ListStatusUpdate;
             return;
         }
@@ -2723,7 +2830,7 @@ namespace ams::mitm::lanywhere {
         u8 type = 0;
         page->status = ListStatusNetwork;
         ssize_t bytes = -1;
-        if (SendFrameTo(fd, UNIFIED_LOBBY_REQUEST_TYPE, body, sizeof(body), nullptr, 0))
+        if (SendFrameTo(fd, regional ? REGIONAL_LOBBY_REQUEST_TYPE : UNIFIED_LOBBY_REQUEST_TYPE, body, sizeof(body), nullptr, 0))
             bytes = ReadListFrame(fd, &type, reply, sizeof(reply), timeout_ms, &page->status);
         ::close(fd);
         if (!AppointmentBackendCurrent(route)) {
@@ -2732,11 +2839,16 @@ namespace ams::mitm::lanywhere {
         }
         if (bytes < 0) return;
         if (type == T_Error && bytes >= 1) {
+            if (regional && reply[0] == 4) {
+                page->status = ListStatusUpdate;
+                return;
+            }
             page->status = lanywhere_list_error_status(reply[0]);
             return;
         }
         page->status = ListStatusProtocol;
-        if (type != UNIFIED_LOBBY_RESPONSE_TYPE || bytes < UNIFIED_LOBBY_HEADER_SIZE) return;
+        if (type != (regional ? REGIONAL_LOBBY_RESPONSE_TYPE : UNIFIED_LOBBY_RESPONSE_TYPE) ||
+            bytes < UNIFIED_LOBBY_HEADER_SIZE) return;
         const u32 snapshot = le32(reply), next = le32(reply + 4);
         const size_t count = reply[8];
         const u8 available = reply[9], total = reply[10], status = reply[11];
@@ -2754,9 +2866,15 @@ namespace ams::mitm::lanywhere {
             std::memcpy(&row, reply + UNIFIED_LOBBY_HEADER_SIZE + i * sizeof(row), sizeof(row));
             auto &group = row.group;
             const char *end = static_cast<const char *>(std::memchr(row.provider, 0, sizeof(row.provider)));
+            const bool is_europe = end && !std::strcmp(row.provider, REGION_PROVIDER_EU);
+            const bool valid_address = is_europe ?
+                (regional && !row.reserved[6] &&
+                 std::memcmp(row.reserved, &europe.sin_addr.s_addr, 4) == 0 &&
+                 std::memcmp(row.reserved + 4, &europe.sin_port, 2) == 0) :
+                std::all_of(std::begin(row.reserved), std::end(row.reserved), [](u8 v) { return v == 0; });
             if (!end || end == row.provider ||
                 !std::all_of(end, static_cast<const char *>(row.provider) + sizeof(row.provider), [](char c) { return c == 0; }) ||
-                !std::all_of(std::begin(row.reserved), std::end(row.reserved), [](u8 v) { return v == 0; }) ||
+                !valid_address ||
                 group.code[6] || group.code[7] || !ValidCode(group.code) || !group.game_id ||
                 !group.max_players || group.max_players > MaxMembers || group.players > group.max_players ||
                 (group.metadata_flags & ~1u) || group.room_access > RoomAccessHidden ||
@@ -2766,7 +2884,11 @@ namespace ams::mitm::lanywhere {
                 return;
             }
             DiscoveryRoute row_route = route;
-            util::Strlcpy(row_route.provider, row.provider, sizeof(row_route.provider));
+            util::Strlcpy(row_route.provider, is_europe ? "self" : row.provider, sizeof(row_route.provider));
+            if (is_europe) {
+                row_route.ipv4 = europe.sin_addr.s_addr;
+                row_route.port = europe.sin_port;
+            }
             if (!ResolveDiscoveryRoute(row_route, &server, provider) ||
                 (!std::strcmp(provider, "self") && group.game_id == UINT64_MAX) ||
                 (std::strcmp(provider, "self") && group.room_access != RoomAccessNone)) {
@@ -2776,6 +2898,8 @@ namespace ams::mitm::lanywhere {
             if (!CleanDisplayField(group.host, sizeof(group.host), true))
                 util::Strlcpy(group.host, "Player", sizeof(group.host));
             AddCachedIdentity(group);
+            // Endpoint bytes belong only to the trusted server wire, never IPC.
+            std::memset(row.reserved, 0, sizeof(row.reserved));
             groups[i] = row;
         }
         *page = {static_cast<s32>(count), next, snapshot, available, total, ListStatusOk};

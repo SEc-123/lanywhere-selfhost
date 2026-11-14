@@ -13,7 +13,7 @@ test('actual TCP relay: flow-controlled byte stream, room isolation and detach r
         stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, LANYWHERE_STATE_DIR: dir,
             LANYWHERE_STATS_PORT: '0', LANYWHERE_PUBLIC_PORT: '0', LANYWHERE_OPS_PORT: '0',
             LANYWHERE_LANPLAY_PORT: '0', LANYWHERE_ENABLE_LANPLAY_UPSTREAM: '0',
-            LANYWHERE_ENABLE_PUBLIC_UPSTREAM: '0', LANYWHERE_SHUTDOWN_GRACE_MS: '0' },
+            LANYWHERE_ENABLE_PUBLIC_UPSTREAM: '0', LANYWHERE_SHUTDOWN_GRACE_MS: '0', LANYWHERE_EU_RELAY: undefined },
     });
     let logs = ''; server.stdout.on('data', b => logs += b); server.stderr.on('data', b => logs += b);
     t.after(async () => {

@@ -3,9 +3,12 @@
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
+const path = require('node:path');
+const { parseEndpoint } = require(fs.existsSync(path.join(__dirname, 'regional-directory.js')) ?
+    './regional-directory.js' : '../server/relay/regional-directory.js');
 
 // Keep the managed service ports and state directory in the unit, and only
-// accept numeric tuning values and an optional generated operations token here.
+// accept documented tuning values, regional address and operations token here.
 const integerRanges = new Map([
     ['LANYWHERE_LANPLAY_PORT', [0, 65535]],
     ['LANYWHERE_ENABLE_PUBLIC_UPSTREAM', [0, 1]],
@@ -47,6 +50,8 @@ function validateConfig(source, { localAddresses = Object.values(os.networkInter
         } else if (key === 'LANYWHERE_OPS_TOKEN') {
             if (!/^[A-Za-z0-9_-]{43}$/.test(value) || Buffer.from(value, 'base64url').toString('base64url') !== value)
                 throw new Error(`${prefix}: ${key} must be a generated 32-byte base64url token`);
+        } else if (key === 'LANYWHERE_EU_RELAY') {
+            try { parseEndpoint(value); } catch (error) { throw new Error(`${prefix}: ${error.message}`); }
         } else if (key === 'LANYWHERE_LANPLAY_PROVIDERS') {
             const allowed = new Set(['lanplay-nl','lanplay-br','lanplay-id','lanplay-nl-jaysea-rust','lanplay-nl-r3ps4j-rust','lanplay-nl-r3ps4j-11452','lanplay-de-servegame',
                 'lanplay-cn-jax','lanplay-cn-gugu','lanplay-cn-olunira','lanplay-cn-shanghai']);

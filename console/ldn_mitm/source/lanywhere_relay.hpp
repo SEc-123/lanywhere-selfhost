@@ -15,6 +15,7 @@
 #include "../../../common/appointments.h"
 #include "../../../common/room_passcode.h"
 #include "../../../common/unified_lobby.h"
+#include "../../../common/regional_relay.h"
 
 namespace ams::mitm::ldn {
     struct NetworkInfo;
@@ -97,8 +98,11 @@ namespace ams::mitm::lanywhere {
     };
     static_assert(sizeof(UnifiedGroup) == UNIFIED_LOBBY_GROUP_SIZE);
     static_assert(offsetof(UnifiedGroup, provider) == sizeof(GroupSummaryV2));
-    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity);
+    void FindUnifiedRooms(const UnifiedRoomsRequest &request, UnifiedPage *page, UnifiedGroup *groups, size_t capacity, bool regional = false);
     Result SelectUnifiedRoom(const UnifiedRoomRequest &request);
+    // Preference for subsequent game host/search/quick match; resets on module restart.
+    u32 GetRelayRegion();
+    Result SetRelayRegion(u32 region);
 
     struct GroupPageV2 { s32 count; u32 next, capabilities, reserved; };
     static_assert(sizeof(GroupPageV2) == 16);
@@ -110,6 +114,8 @@ namespace ams::mitm::lanywhere {
     u32 SetRoomAccess(const RoomAccessChange &change);
     u32 UnlockRoomAccess(const RoomAccessUnlock &unlock);
     RoomPasscodeReply LookupRoomPasscode(const RoomPasscodeLookup &lookup);
+    RoomPasscodeReply LookupRegionalRoomPasscode(const RegionalPasscodeLookup &lookup);
+    u32 UnlockRegionalRoomAccess(const RegionalAccessUnlock &unlock);
 
     enum class MatchMode : u8 { Manual, Quick, Exact };
     enum class MatchState : u8 { Idle, WaitingForGame, Searching, Assigned, Joining, Joined, Expired, Cancelled, Error };
@@ -140,6 +146,7 @@ namespace ams::mitm::lanywhere {
         bool public_enabled;
         char provider[33];
         u64 selection_epoch;
+        u64 gameplay_generation;
         u64 selected_game_id;
         char selected_code[8];
     };

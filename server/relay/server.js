@@ -21,6 +21,7 @@
 //   LANYWHERE_JOIN_TIMEOUT_MS plazo para que el anfitrión confirme un invitado en su grupo (10000).
 //   LANYWHERE_UDP_BIND_ADDRESS IPv4 local para las respuestas UDP (0.0.0.0 por defecto).
 //   LANYWHERE_ENABLE_PUBLIC_UPSTREAM=1 enables only the fixed lanywhere-public provider (default 0).
+//   LANYWHERE_EU_RELAY optional owned regional relay whose published rooms are listed by this node (IPv4:port).
 
 const fs = require('fs');
 const path = require('path');
@@ -30,6 +31,7 @@ const crypto = require('crypto');
 const matchmaking = require('./matchmaking');
 const { groupPage } = require('./group-page');
 const { create: createUnifiedLobby } = require('./unified-lobby');
+const regionalDirectory = require('./regional-directory');
 const trafficStore = require('./traffic-store');
 const appointmentStore = require('./appointments');
 const pushProtocol = require('./appointment-push');
@@ -61,6 +63,7 @@ const UPSTREAM_BIND_ADDRESS = process.env.LANYWHERE_UPSTREAM_BIND_ADDRESS ?? '0.
 if (!net.isIPv4(UPSTREAM_BIND_ADDRESS)) throw new Error('Invalid upstream bind address');
 const UDP_BIND_ADDRESS = process.env.LANYWHERE_UDP_BIND_ADDRESS ?? '0.0.0.0';
 if (!net.isIPv4(UDP_BIND_ADDRESS)) throw new Error('LANYWHERE_UDP_BIND_ADDRESS debe ser una dirección IPv4 local');
+const regionalEndpoint = regionalDirectory.parseEndpoint(process.env.LANYWHERE_EU_RELAY);
 const tcpPorts = [PORT, STATS_PORT, PUBLIC_PORT, OPS_PORT].filter(Boolean);
 if (new Set(tcpPorts).size !== tcpPorts.length || (PORT && PORT === LANPLAY_PORT))
     throw new Error('los puertos del servidor se superponen');
@@ -78,7 +81,8 @@ const UDP_FEATURES = 4 | 8;
 const SELF_CAPABILITIES = 3 | UDP_FEATURES | 16 | 32 | 64 | streamProtocol.CAPABILITY |
     ((LANPLAY_PORT || process.env.LANYWHERE_LANPLAY_REALM) ? streamProtocol.LEGACY_CAPABILITY : 0) |
     (process.env.LANYWHERE_LANPLAY_REALM ? 0 : upstreamGateway.ROOM_PASSCODE_CAPABILITY |
-        upstreamGateway.ROOM_ACCESS_CAPABILITY | upstreamGateway.UNIFIED_LOBBY_CAPABILITY | pushProtocol.CAPABILITY);
+        upstreamGateway.ROOM_ACCESS_CAPABILITY | upstreamGateway.UNIFIED_LOBBY_CAPABILITY |
+        pushProtocol.CAPABILITY | (regionalEndpoint ? regionalDirectory.CAPABILITY : 0));
 const IDLE_MS = 20000;
 const GRACE_MS = envInt('LANYWHERE_GRACE_MS', 60000, 1, 300000);
 const MATCH_WAIT_MS = envInt('LANYWHERE_MATCH_WAIT_MS', 90000, 1, 300000);
@@ -203,6 +207,13 @@ const unifiedLobby = realmId ? null : createUnifiedLobby({
     providerIds: upstreams.lobbyProviders(), queryProvider: upstreams.queryLobby,
     selfRows: () => [...rooms.values()].filter(listedSelfGameRoom)
         .map(room => roomMetadata.summary(room, describeGameAccess(room))),
+    regional: regionalEndpoint ? {
+        provider: regionalDirectory.PROVIDER,
+        ...regionalDirectory.create(regionalEndpoint, {
+            localAddress: UPSTREAM_BIND_ADDRESS === '0.0.0.0' ? undefined : UPSTREAM_BIND_ADDRESS,
+            sent: bytes => count(bytes + TCP_OVERHEAD),
+        }),
+    } : null,
 });
 
 // Panel de actividad (stats.js): hasta que arranca, no cuenta nada.
@@ -734,14 +745,18 @@ function onFrame(socket, type, body) {
     }
     if (appointmentPush?.has(socket) && type !== T.PING)
         return sendError(socket, E.BAD_REQUEST, 'la conexión de suscripción es de solo lectura');
-    if (type === T.UNIFIED_LOBBY) {
+    const regional = type === regionalDirectory.REQUEST;
+    if (type === T.UNIFIED_LOBBY || regional) {
         if (!unifiedLobby || !upstreams.isSelf(socket) || body.length !== 8)
             return sendError(socket, E.BAD_REQUEST, 'FIND_PAGE no válido');
+        if (regional && !regionalEndpoint)
+            return sendError(socket, E.BAD_REQUEST, 'regional lobby is not configured');
         upstreams.handleFrame(socket, type, body);
         if (paused) return sendError(socket, E.PAUSED, PAUSED_TEXT);
         if (draining || !allowed(plainIp(socket.remoteAddress), 'unifiedLobby'))
             return sendError(socket, E.BUSY, 'demasiadas búsquedas');
-        return send(socket, T.UNIFIED_LOBBY_REPLY, unifiedLobby.page(body.readUInt32LE(0), body.readUInt32LE(4)));
+        return send(socket, regional ? regionalDirectory.RESPONSE : T.UNIFIED_LOBBY_REPLY,
+            unifiedLobby.page(body.readUInt32LE(0), body.readUInt32LE(4), regional));
     }
     if (type === T.GAME_CODE) return exchangeGameCode(socket, body);
     if (type === 0x26) {

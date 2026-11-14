@@ -22,7 +22,7 @@
 /* SOURCE_CLEAN_NICKNAME */
 
 typedef struct { int create, join, leave, cancel, quick, select, launch, public_write, nickname_write, provider_write;
-    int ask_code, page, draw, busy, write_error, sleep, language, share_password, unlock_password, appointment_open, select_route; } Calls;
+    int ask_code, page, draw, busy, write_error, sleep, language, share_password, unlock_password, appointment_open, select_route, set_region; } Calls;
 static Calls calls;
 static int g_lanywhere;
 static const char *room_password_edit(int *service, const char room[8], bool supports_hidden, RoomPasswordEdit *edit)
@@ -44,6 +44,12 @@ static atomic_bool g_inventory_running;
 static int g_guide_page;
 static LobbyRoomId g_touched_room;
 static bool accept_code = true, save_ok = true, launch_ok = true;
+static Result lanywhere_set_host_region(u32 region)
+{
+    assert(region <= RelayRegionEurope);
+    calls.set_region++;
+    return save_ok ? 0 : 1;
+}
 static unsigned checks;
 static u64 now_ms(void) { return 10000; }
 static void svcSleepThread(u64 nanoseconds) { (void)nanoseconds; calls.sleep++; }
@@ -154,7 +160,7 @@ static View lobby(void) {
     strcpy(v.config.provider,"self");
     return v;
 }
-static int effects(void) {return calls.create+calls.join+calls.leave+calls.cancel+calls.quick+calls.select+calls.select_route+calls.launch+calls.public_write+calls.nickname_write+calls.provider_write;}
+static int effects(void) {return calls.create+calls.join+calls.leave+calls.cancel+calls.quick+calls.select+calls.select_route+calls.launch+calls.public_write+calls.nickname_write+calls.provider_write+calls.set_region;}
 static void checked(void) {checks++;}
 static void choose(View *v) {v->count=1;strcpy(v->groups[0].code,"ABC234");v->groups[0].game_id=1;v->selection=lobby_room_id(&v->groups[0]);v->sel=0;}
 
@@ -281,6 +287,35 @@ int main(void) {
     assert(v.external_confirm&&calls.select_route==1&&selected_route.game_id==UINT64_MAX&&
            !strcmp(v.pinned.provider,"lanplay-nl")&&!strcmp(selected_route.provider,"lanplay-nl"));checked();
     step(&v,HidNpadButton_B);assert(calls.cancel==1&&!v.external_confirm&&!v.pinned.game_id);checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnified;
+    step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionDefault);checked();
+    v.host_region_available=true;
+    step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionDefault);checked();
+    v.capabilities|=REGIONAL_LOBBY_CAPABILITY;
+    step(&v,HidNpadButton_Y);assert(calls.set_region==1&&v.host_region==RelayRegionEurope&&!v.message[0]);checked();
+    save_ok=false;step(&v,HidNpadButton_Y);
+    assert(calls.set_region==2&&v.host_region==RelayRegionEurope&&!strcmp(v.message,"Could not change host region."));checked();
+    v.capabilities &= ~REGIONAL_LOBBY_CAPABILITY;
+    save_ok=true;step(&v,HidNpadButton_Y);assert(v.host_region==RelayRegionDefault&&calls.set_region==3);checked();
+    calls.set_region=0;
+    v.st.state=StateConnecting;
+    step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionDefault);checked();
+    v.st.state=StateIdle;v.match.mode=LobbyQuick;v.match.state=MatchAssigned;v.capabilities|=ROOM_ACCESS_CAPABILITY;
+    v.match.game_id=2;strcpy(v.match.room,"XYZ987");v.host_region=RelayRegionEurope;
+    step(&v,HidNpadButton_Y);assert(!calls.set_region&&v.host_region==RelayRegionEurope);checked();
+    assert(!strcmp(room_password_target(&v).provider,REGION_PROVIDER_EU));checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnified;v.host_region_available=true;
+    choose(&v);strcpy(v.sources[0],REGION_PROVIDER_EU);
+    v.selection=lobby_room_id_on(&v.groups[0],v.sources[0]);v.groups[0].room_access=RoomAccessHidden;
+    step(&v,HidNpadButton_A);
+    assert(!v.external_confirm&&calls.select_route==1&&!calls.select&&!calls.set_region&&
+           !strcmp(selected_route.provider,REGION_PROVIDER_EU)&&v.host_region==RelayRegionDefault&&v.pinned_group.room_access==RoomAccessHidden);checked();
+    v.match.mode=LobbyExact;v.match.state=MatchWaitScan;v.capabilities|=ROOM_ACCESS_CAPABILITY;
+    assert(!strcmp(room_password_target(&v).provider,REGION_PROVIDER_EU));checked();
+    v=lobby();v.discovery=LobbyDiscoveryUnified;v.appointment_game_id=2;
+    choose(&v);strcpy(v.sources[0],REGION_PROVIDER_EU);v.selection=lobby_room_id_on(&v.groups[0],v.sources[0]);
+    route_result=1;step(&v,HidNpadButton_A);
+    assert(calls.select_route==1&&!calls.select&&!v.pinned.game_id&&!v.external_confirm);checked();
     v=lobby();strcpy(v.config.provider,"lanplay-nl");choose(&v);route_result=1;
     step(&v,HidNpadButton_A);assert(v.external_confirm&&calls.select_route==1&&!v.pinned.provider[0]);
     step(&v,HidNpadButton_B);assert(!calls.cancel&&!v.external_confirm);checked();

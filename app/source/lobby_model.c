@@ -88,6 +88,11 @@ bool lobby_provider_is_lanplay(const char *provider)
     return index >= 2 && index < LOBBY_PROVIDER_COUNT;
 }
 
+bool lobby_provider_is_self_relay(const char *provider)
+{
+    return provider && (strcmp(provider, "self") == 0 || strcmp(provider, REGION_PROVIDER_EU) == 0);
+}
+
 LobbyRoomId lobby_room_id_on(const LobbyGroup *group, const char *provider)
 {
     if (!group->game_id || group->code[6] != '\0')
@@ -102,7 +107,9 @@ LobbyRoomId lobby_room_id_on(const LobbyGroup *group, const char *provider)
     if (provider && provider[0]) {
         size_t size = 0;
         while (size < sizeof(id.provider) && provider[size]) ++size;
-        if (size == sizeof(id.provider) || lobby_provider_index(provider) < 0) return (LobbyRoomId){0};
+        if (size == sizeof(id.provider) ||
+            (lobby_provider_index(provider) < 0 && strcmp(provider, REGION_PROVIDER_EU) != 0))
+            return (LobbyRoomId){0};
         memcpy(id.provider, provider, size);
     }
     return id;
@@ -135,20 +142,21 @@ int lobby_room_index(LobbyRoomId id, const LobbyGroup *groups, size_t count)
 }
 
 bool lobby_unified_page_valid(UnifiedPage page, UnifiedRoomsRequest request,
-                              const LobbyUnifiedGroup *rows, size_t capacity)
+                              const LobbyUnifiedGroup *rows, size_t capacity, bool regional)
 {
     if (page.count == -1)
         return page.next == UNIFIED_LOBBY_END &&
             (lanywhere_list_status_valid(page.status) || page.status == UnifiedListStale);
     if (page.count < 0 || (size_t)page.count > capacity || page.status != ListStatusOk || !page.snapshot ||
         (request.snapshot && request.snapshot != page.snapshot) || page.available > page.total ||
-        page.total > LOBBY_PROVIDER_COUNT ||
+        page.total > (uint32_t)(LOBBY_PROVIDER_COUNT + regional) ||
         (page.next != UNIFIED_LOBBY_END && (!page.count || page.next <= request.offset ||
                                            page.next - request.offset != (uint32_t)page.count)))
         return false;
     for (int32_t i = 0; i < page.count; i++) {
         const LobbyUnifiedGroup *row = &rows[i];
-        if (!row->provider[0] || !lobby_room_id_on(&row->group, row->provider).game_id)
+        if (!row->provider[0] || !lobby_room_id_on(&row->group, row->provider).game_id ||
+            (!regional && strcmp(row->provider, REGION_PROVIDER_EU) == 0))
             return false;
         for (size_t j = 0; j < sizeof(row->reserved); ++j)
             if (row->reserved[j]) return false;

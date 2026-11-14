@@ -24,7 +24,7 @@ int main(int argc, char **argv)
                              "network-choice", "unknown-game", "external-confirm", "lanplay-main", "lanplay-private-guard",
                              "network-config-unreadable", "network-config-invalid", "local-match", "inventory-error", "external-offline",
                              "olunira-catalog-restored", "game-password", "share-password",
-                              "protected-and-full-rooms", "protected-room", "unlocked-room", "password-visibility", "unified-mixed" };
+                              "protected-and-full-rooms", "protected-room", "unlocked-room", "password-visibility", "unified-mixed", "regional-lobby", "regional-locked" };
     for (int zh = 0; zh < 2; zh++) {
         g_zh = zh != 0; ui_set_language(g_zh, false);
         snprintf(sample_games[0].name, sizeof(sample_games[0].name), "%s", zh ? "示例游戏：多人冒险与合作挑战" : "Sample game: multiplayer adventure");
@@ -141,6 +141,27 @@ int main(int argc, char **argv)
                 strcpy(v.sources[1], "lanywhere-public");
                 strcpy(v.sources[2], "lanplay-nl");
             }
+            if (scene == 37 || scene == 38) {
+                v.discovery = LobbyDiscoveryUnified;
+                v.capabilities |= REGIONAL_LOBBY_CAPABILITY | ROOM_ACCESS_CAPABILITY;
+                v.unified = (UnifiedPage){.count=2,.snapshot=91,.available=14,.total=14,.next=UNIFIED_LOBBY_END};
+                v.host_region_available = true;
+                v.host_region = scene == 37 ? RelayRegionEurope : RelayRegionDefault;
+                v.count = 2;
+                for (int row = 0; row < v.count; ++row) {
+                    v.groups[row] = (LobbyGroup){.code="ABC234",.game_id=100,.application_id=200,
+                        .metadata_flags=LOBBY_META_HOST,.players=2,.max_players=4,.host="Sample host"};
+                }
+                v.groups[1].room_access = RoomAccessHidden;
+                strcpy(v.sources[0], "self");
+                strcpy(v.sources[1], REGION_PROVIDER_EU);
+                if (scene == 38) {
+                    v.pinned = lobby_room_id_on(&v.groups[1],v.sources[1]);
+                    v.pinned_group = v.groups[1];
+                    v.match = (LobbyMatch){.mode=LobbyExact,.state=MatchAssigned,.game_id=100,.room="ABC234",.players=2,.target=4};
+                    v.password = (RoomPasswordView){.room=v.pinned,.locked=true};
+                }
+            }
             char path[1024];
             snprintf(path, sizeof(path), "%s/main-%s-%s.png", argv[1], zh ? "zh" : "en", scenes[scene]);
             output_path = path;
@@ -180,6 +201,9 @@ int main(int argc, char **argv)
                 (touch_action_at(100, 310) != HidNpadButton_A || touch_action_at(100, 380) != HidNpadButton_X ||
                  touch_action_at(100, 450) != HidNpadButton_B)) {
                 fprintf(stderr, "Password visibility buttons not touchable in %s\n", path); failures++;
+            }
+            if (scene == 37 && touch_action_at(SIDE_X + 20, 153) != HidNpadButton_Y) {
+                fprintf(stderr, "Host region button is missing in %s\n", path); failures++;
             }
             for (int i = 0; i < g_zone_count; i++) {
                 TouchZone z = g_zones[i];

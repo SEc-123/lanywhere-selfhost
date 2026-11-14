@@ -155,7 +155,7 @@ int main(){unsigned checks=0;reset();GameRoute route{};
     with tempfile.TemporaryDirectory(prefix='switch-lcid-route-') as temp:
         path=Path(temp);cpp=path/'route.cpp';binary=path/'route';cpp.write_text(harness)
         compiler=shlex.split(os.environ.get('CXX','c++'))
-        subprocess.run(compiler+['-std=c++17','-Wall','-Wextra','-Werror','-pthread',str(cpp),'-o',str(binary)],check=True)
+        subprocess.run(compiler+['-std=c++17','-Wall','-Wextra','-Werror','-pthread','-I',str(ROOT/'common'),str(cpp),'-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True)
     print('Relay source SHA-256:',hashlib.sha256(source.encode()).hexdigest())
     print('Host fixture only: no Switch runtime, SD or production network.')

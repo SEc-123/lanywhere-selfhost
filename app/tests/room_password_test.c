@@ -9,7 +9,9 @@ static unsigned reads, writes, unlocks, keyboard_opened, keyboard_closed;
 static RoomPasswordView guest;
 static const LobbyRoomId first = {.code = "ABCD23", .game_id = 1};
 static const LobbyRoomId second = {.code = "ABCD23", .game_id = 2};
+static const LobbyRoomId eu = {.code = "ABCD23", .game_id = 1, .provider = REGION_PROVIDER_EU};
 static RoomPasscodeLookup last_lookup;
+static unsigned regional_reads, regional_unlocks;
 static RoomPasscodeReply next_reply;
 static RoomPasscodeChange last_write;
 static RoomAccessChange last_access;
@@ -38,6 +40,16 @@ Result mock_password_dispatch(Service *service, unsigned command, const void *in
         ++reads;
         if (change_room_during_request) assert(room_password_tick(&guest, second, false, 30000));
         return 0;
+    case REGIONAL_PASSCODE_IPC_GET: {
+        RegionalPasscodeLookup lookup;
+        assert(in_size == sizeof(lookup) && out_size == sizeof(next_reply));
+        memcpy(&lookup, input, in_size);
+        assert(lookup.region == RelayRegionEurope && !lookup.reserved && lookup.lookup.game_id == eu.game_id);
+        assert(!memcmp(lookup.lookup.room, eu.code, sizeof(eu.code)));
+        memcpy(output, &next_reply, out_size);
+        ++regional_reads;
+        return 0;
+    }
     case ROOM_PASSCODE_IPC_HOST:
         assert(!input && !in_size && out_size == sizeof(host));
         memcpy(output, &host, out_size);
@@ -60,6 +72,17 @@ Result mock_password_dispatch(Service *service, unsigned command, const void *in
         memcpy(output, &unlock_status, out_size);
         ++unlocks;
         return 0;
+    case REGIONAL_PASSCODE_IPC_UNLOCK: {
+        RegionalAccessUnlock unlock;
+        assert(in_size == sizeof(unlock) && out_size == sizeof(unlock_status));
+        memcpy(&unlock, input, in_size);
+        assert(unlock.region == RelayRegionEurope && !unlock.reserved && unlock.unlock.game_id == eu.game_id);
+        assert(!memcmp(unlock.unlock.room, eu.code, sizeof(eu.code)));
+        assert(!strcmp(unlock.unlock.passcode, keyboard_text));
+        memcpy(output, &unlock_status, out_size);
+        ++regional_unlocks;
+        return 0;
+    }
     default:
         assert(false);
         return 1;
@@ -157,6 +180,15 @@ int main(void)
     assert(room_password_tick(&guest, first, true, 40160) && guest.failed && !guest.value[0]);
     assert(room_password_tick(&guest, second, false, 40180) && !guest.unlocked && !guest.locked && !guest.value[0]);
 
+    assert(room_password_tick(&guest, eu, true, 40200) && guest.pending && guest.locked && !guest.unlocked);
+    next_reply = (RoomPasscodeReply){.status = RoomPasscodeLocked};
+    assert(room_password_worker_exchange(&g_service) && regional_reads == 1);
+    assert(room_password_tick(&guest, eu, true, 40220) && guest.locked && !guest.pending);
+    assert(!strcmp(room_password_unlock(&g_service, &guest), "Room unlocked.") && guest.unlocked);
+    assert(regional_unlocks == 1 && unlocks == 2);
+    assert(room_password_tick(&guest, first, true, 40240) && !guest.unlocked);
+    assert(room_password_worker_exchange(&g_service) && regional_reads == 1);
+    assert(room_password_tick(&guest, first, true, 40260) && guest.locked && !guest.pending);
     RoomPasswordEdit edit = {0};
     const char wrong_room[8] = "ZZZZZZ";
     const unsigned previous_keyboards = keyboard_opened;

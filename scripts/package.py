@@ -94,6 +94,17 @@ def fixed_profile():
     return str(server_ipv4(address[1])), relay_port(port[1])
 
 
+def europe_profile():
+    profile = (ROOT / 'common/relay_profile.h').read_text(encoding='utf-8')
+    address = re.search(r'^#define RELAY_PROFILE_EU_IPV4\s+"([^"]*)"$', profile, re.MULTILINE)
+    if not address or not address[1]:
+        return None
+    port = re.search(r'^#define RELAY_PROFILE_EU_PORT\s+(\d+)$', profile, re.MULTILINE)
+    if port is None:
+        raise ValueError('Missing port in the Europe relay profile')
+    return str(server_ipv4(address[1])), relay_port(port[1])
+
+
 def package_files(version, server, port, embedded):
     entries = {
         (TITLE_DIR / "exefs.nsp").as_posix(): read_entry(SD_ROOT / TITLE_DIR / "exefs.nsp", valid_exefs),
@@ -108,8 +119,18 @@ def package_files(version, server, port, embedded):
     if embedded is not None:
         address, _ = embedded
         needle = address.encode('ascii') + b'\0'
-        if needle not in entries['switch/lanywhere.nro'] or needle not in read_entry(ROOT / 'console/ldn_mitm/ldn_mitm.elf'):
+        module = read_entry(ROOT / 'console/ldn_mitm/ldn_mitm.elf')
+        if needle not in entries['switch/lanywhere.nro'] or needle not in module:
             raise ValueError('Rebuild both Switch binaries with the fixed relay profile before packaging')
+        europe = europe_profile()
+        if europe is not None:
+            if europe == embedded:
+                raise ValueError('The Europe relay must use its own endpoint')
+            needle = europe[0].encode('ascii') + b'\0'
+            if needle not in entries['switch/lanywhere.nro'] or needle not in module:
+                raise ValueError('Rebuild both Switch binaries with the Europe relay profile before packaging')
+    elif europe_profile() is not None:
+        raise ValueError('Europe relay selection requires the managed fixed relay profile')
     elif server is not None:
         entries["lanywhere/config.ini"] = f"server={server}\nport={port}\npublic=1\n".encode("ascii")
     notices = ROOT / "third_party"

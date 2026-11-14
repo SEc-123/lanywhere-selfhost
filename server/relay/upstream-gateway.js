@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { parse: parseMetadata, RECORD_BYTES } = require('./room-metadata');
 const streamProtocol = require('./tcp-stream-protocol');
 const { CAPABILITY: APPOINTMENT_PUSH_CAPABILITY } = require('./appointment-push');
+const { CAPABILITY: REGIONAL_LOBBY_CAPABILITY } = require('./regional-directory');
 const MAGIC = 0x594e414c;
 const SELECT = 0x20, SELECTED = 0xa0, CAPS = 0x0b;
 const ROOM_PASSCODE_CAPABILITY = 512, ROOM_ACCESS_CAPABILITY = 1024, UNIFIED_LOBBY_CAPABILITY = 2048;
@@ -52,7 +53,9 @@ function create({ providers = [], send: sendFront, sendUdp, isLocalToken = () =>
             !Number.isInteger(p.maxConnections) || p.maxConnections < 1 || p.maxConnections > 8) throw Error('Invalid allowlisted upstream');
         registry.set(p.id, { ...p, active: 0, rates: new Map() });
     }
-    const capabilities = p => ((p.capabilities || p.udpCaps || 0) & ~(ROOM_PASSCODE_CAPABILITY | ROOM_ACCESS_CAPABILITY | UNIFIED_LOBBY_CAPABILITY | APPOINTMENT_PUSH_CAPABILITY)) | (p.adapterMetadata ? 64 : 0);
+    const selfOnlyCapabilities = ROOM_PASSCODE_CAPABILITY | ROOM_ACCESS_CAPABILITY | UNIFIED_LOBBY_CAPABILITY |
+        APPOINTMENT_PUSH_CAPABILITY | REGIONAL_LOBBY_CAPABILITY;
+    const capabilities = p => ((p.capabilities || p.udpCaps || 0) & ~selfOnlyCapabilities) | (p.adapterMetadata ? 64 : 0);
     const routes = new Map(), localLocked = new WeakSet(), tokens = new Map();
     const lobbyQueries = new WeakMap();
     const send = (front, type, body) => {

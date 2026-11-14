@@ -13,7 +13,7 @@ spec=importlib.util.spec_from_file_location('routes',root/'app/tests/input_routi
 routes=importlib.util.module_from_spec(spec);spec.loader.exec_module(routes)
 game_type=re.search(r'typedef struct\s*\{[^}]*\}\s*GameInfo;',source).group()
 functions='\n\n'.join(routes.function(source,'static '+name) for name in (
-    'const GameInfo *local_game_info(', 'CatalogMatch room_catalog_match(', 'bool game_info_has_lcid(', 'const char *room_title(', 'const GameInfo *display_game_icon(', 'const char *room_title_note(', 'const char *provider_label(', 'void group_card('))
+    'const GameInfo *local_game_info(', 'CatalogMatch room_catalog_match(', 'bool game_info_has_lcid(', 'const char *room_title(', 'const GameInfo *display_game_icon(', 'const char *room_title_note(', 'const char *provider_label(', 'const char *region_label(', 'void group_card('))
 harness=r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -21,6 +21,7 @@ harness=r'''
 #include <stdio.h>
 #include <string.h>
 #include "lobby_model.h"
+#include "relay_config.h"
 #include "game_catalog.h"
 #include "ui_text.h"
 #include "../../common/game_identity_text.h"

@@ -27,7 +27,7 @@ using namespace ams::mitm::lanywhere;
 static s64 now_ms;static int mode,attempts,installs,closed,sends,close_transport;static std::vector<int>budgets;static std::vector<s64>sleeps;
 enum class RelayState:u8{Idle=0,Connecting=1,InRoom=2,Error=3};static RelayState g_state;
 static std::mutex g_lock;static bool g_recovering;static u32 g_token,g_my_ip;static u64 g_game_id;static u8 g_my_index;
-static sockaddr_in g_server;static char g_room_provider[33],g_code[7],g_error[64];
+static sockaddr_in g_server,expected_server;static char g_room_provider[33],g_code[7],g_error[64],expected_provider[33];static unsigned config_reads;
 namespace os {
 struct TimeSpan{s64 ms;static TimeSpan FromMilliSeconds(s64 n){return{n};}s64 GetMilliSeconds()const{return ms;}};
 struct Tick{s64 ms;TimeSpan ToTimeSpan()const{return{ms};}};
@@ -38,7 +38,7 @@ using TimeSpan=os::TimeSpan;constexpr TimeSpan ReconnectWindow{55000};constexpr 
 static os::Tick g_last_keepalive;
 /* STATUS_DECL */
 struct TestMember{bool present;};static TestMember g_members[8]{};static u32 g_sent=0,g_received=0;constexpr char ConfigError[]="bad config";
-bool LoadServer(sockaddr_in*){return true;}void GetStatus(Status*);
+bool LoadServer(sockaddr_in*out){++config_reads;*out={};out->sin_addr.s_addr=0x0100007f;out->sin_port=4321;return true;}void GetStatus(Status*);
 
 namespace util {void Strlcpy(char*d,const char*s,size_t n){std::snprintf(d,n,"%s",s);}}
 u32 le32(const u8*p){return (u32)p[0]|((u32)p[1]<<8)|((u32)p[2]<<16)|((u32)p[3]<<24);}u64 le64(const u8*p){return le32(p)|((u64)le32(p+4)<<32);}
@@ -52,7 +52,7 @@ static int fake_close(int fd){assert(fd==71||fd==72);++closed;return 0;}
 bool SendFrameTo(int fd,u8 type,const void*,size_t,const void*,size_t){assert(fd==71&&type==T_Leave);++sends;return true;}
 bool Handshake(const sockaddr_in&server,u8 type,const u8*body,size_t size,Session*s,int timeout,const char*provider,int budget){
  ++attempts;budgets.push_back(budget);assert(type==T_Resume&&size==10&&le32(body)==42&&!std::memcmp(body+4,"ABC234",6));
- assert(server.sin_addr.s_addr==0x0100007f&&server.sin_port==1234&&!std::strcmp(provider,"lanplay-cn-jax"));
+ assert(server.sin_addr.s_addr==expected_server.sin_addr.s_addr&&server.sin_port==expected_server.sin_port&&!std::strcmp(provider,expected_provider));
  assert(timeout>0&&timeout<=5000&&timeout<=budget&&budget==55000-now_ms);
  assert(g_recovering&&!std::strcmp(g_error,"Reconnecting to the room."));Status view{};GetStatus(&view);assert(view.state==RelayState::Connecting&&g_state==RelayState::InRoom&&!std::strcmp(view.error,"Reconnecting to the room."));
  *s={};s->tcp=71;s->udp=72;s->no_seat=mode==2;
@@ -69,8 +69,13 @@ bool Handshake(const sockaddr_in&server,u8 type,const u8*body,size_t size,Sessio
 }
 /* ACTUAL */
 #undef close
-void reset(int m){mode=m;now_ms=attempts=installs=closed=sends=close_transport=0;budgets.clear();sleeps.clear();g_state=RelayState::InRoom;g_recovering=false;g_token=42;g_my_ip=0x0a0d0203;g_my_index=2;g_game_id=777;g_server={};g_server.sin_addr.s_addr=0x0100007f;g_server.sin_port=1234;std::strcpy(g_room_provider,"lanplay-cn-jax");std::strcpy(g_code,"ABC234");std::strcpy(g_error,"stale prior error");}
+void reset(int m){mode=m;now_ms=attempts=installs=closed=sends=close_transport=0;budgets.clear();sleeps.clear();g_state=RelayState::InRoom;g_recovering=false;g_token=42;g_my_ip=0x0a0d0203;g_my_index=2;g_game_id=777;g_server={};g_server.sin_addr.s_addr=0x0100007f;g_server.sin_port=1234;std::strcpy(g_room_provider,"lanplay-cn-jax");std::strcpy(g_code,"ABC234");std::strcpy(g_error,"stale prior error");expected_server=g_server;std::strcpy(expected_provider,g_room_provider);config_reads=0;}
 int main(){
+ reset(30);g_server.sin_addr.s_addr=0x0200007f;g_server.sin_port=htons(11461);std::strcpy(g_room_provider,"self");
+ expected_server=g_server;std::strcpy(expected_provider,"self");
+ assert(Reconnect()==RecoveryResult::Resumed&&attempts==1&&installs==1&&config_reads==0);
+ assert(g_server.sin_addr.s_addr==expected_server.sin_addr.s_addr&&g_server.sin_port==expected_server.sin_port);
+ std::puts("PASS regional reconnect: captured Europe/self endpoint survives a different configured default, no config reread");
  reset(1);assert(Reconnect()==RecoveryResult::Resumed);assert(attempts==3&&installs==1&&close_transport==1&&!g_recovering&&!g_error[0]);assert(now_ms==3300&&g_last_keepalive.ms==3300&&g_my_ip==0x0a0d0203&&g_token==42);Status view{};GetStatus(&view);assert(view.state==RelayState::InRoom&&!view.error[0]);s64 total=0;for(auto n:sleeps)total+=n;assert(total==3000);
  for(int busy:{20,21}){reset(busy);assert(Reconnect()==RecoveryResult::Resumed&&attempts==3&&now_ms==10100&&installs==1);}
  reset(2);assert(Reconnect()==RecoveryResult::Expired&&attempts==1&&installs==0&&sleeps.empty());

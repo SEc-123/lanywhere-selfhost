@@ -57,9 +57,11 @@ struct OutBuffer {
 class LanywhereService {
 public:
     Result ListUnifiedRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out);
+    Result ListRegionalRooms(UnifiedRoomsRequest request, sf::Out<UnifiedPage> page, const sf::OutBuffer &out);
 };
 '''+discovery.function(source,'void FindUnifiedRooms(')+'\n'+discovery.function(
-    (discovery.SOURCE.parent/'lanywhere_service.cpp').read_text(), 'Result LanywhereService::ListUnifiedRooms(')+r'''
+    (discovery.SOURCE.parent/'lanywhere_service.cpp').read_text(), 'Result LanywhereService::ListUnifiedRooms(')+'\n'+discovery.function(
+    (discovery.SOURCE.parent/'lanywhere_service.cpp').read_text(), 'Result LanywhereService::ListRegionalRooms(')+r'''
 class StatusRelay {
  int listener;std::thread thread;
  public: u16 port;std::atomic<int> queries{0};std::atomic<size_t> query_bytes{0};
@@ -101,7 +103,9 @@ public:
     std::atomic<unsigned> queries{0};
     std::atomic<u32> offset{0}, snapshot{0};
 
-    explicit UnifiedRelay(std::vector<u8> payload, u32 capabilities = UNIFIED_LOBBY_CAPABILITY) {
+    explicit UnifiedRelay(std::vector<u8> payload, u32 capabilities = UNIFIED_LOBBY_CAPABILITY,
+                          u8 request_type=UNIFIED_LOBBY_REQUEST_TYPE,
+                          u8 response_type=UNIFIED_LOBBY_RESPONSE_TYPE, bool stall=false) {
         listener = ::socket(AF_INET, SOCK_STREAM, 0);
         assert(listener >= 0);
         sockaddr_in a{};
@@ -112,7 +116,7 @@ public:
         socklen_t n = sizeof(a);
         assert(!::getsockname(listener, reinterpret_cast<sockaddr *>(&a), &n));
         port = ntohs(a.sin_port);
-        worker = std::thread([this, payload, capabilities] {
+        worker = std::thread([this, payload, capabilities, request_type, response_type, stall] {
             const int fd = ::accept(listener, nullptr, nullptr);
             if (fd < 0) return;
             u8 type = 0;
@@ -122,11 +126,12 @@ public:
             put32(cap.data(), capabilities);
             response(fd, T_CapsReply, cap);
             if (receive(fd, type, body)) {
-                assert(type == UNIFIED_LOBBY_REQUEST_TYPE && body.size() == 8);
+                assert(type == request_type && body.size() == 8);
                 offset = le32(body.data());
                 snapshot = le32(body.data() + 4);
                 ++queries;
-                response(fd, UNIFIED_LOBBY_RESPONSE_TYPE, payload);
+                if (stall) std::this_thread::sleep_for(std::chrono::milliseconds(3200));
+                else response(fd, response_type, payload);
             }
             ::close(fd);
         });
@@ -227,6 +232,74 @@ static unsigned testUnified() {
     }
     return cases;
 }
+static unsigned testRegional() {
+    unsigned cases=0;
+    LanywhereService service;
+    UnifiedPage page{};
+    UnifiedGroup rows[UNIFIED_LOBBY_PAGE_SIZE]{};
+    sockaddr_in eu{};
+    if (!EuropeEndpoint(&eu)) {
+        UnifiedRelay relay(unifiedReply());config(relay.port,"self");
+        service.ListRegionalRooms({1,17},{&page},{rows,sizeof(rows)});
+        assert(page.count==2&&page.status==ListStatusOk&&relay.queries==1);
+        return 1; // No configured node retains v1 wire behavior.
+    }
+    auto body=unifiedReply();
+    body.resize(UNIFIED_LOBBY_HEADER_SIZE+sizeof(UnifiedGroup));
+    body[8]=1;put32(body.data()+4,UNIFIED_LOBBY_END);
+    UnifiedGroup eurow{};std::memcpy(&eurow,body.data()+UNIFIED_LOBBY_HEADER_SIZE,sizeof(eurow));
+    std::strcpy(eurow.provider,REGION_PROVIDER_EU);
+    std::memcpy(eurow.reserved,&eu.sin_addr.s_addr,4);
+    std::memcpy(eurow.reserved+4,&eu.sin_port,2);
+    std::memcpy(body.data()+UNIFIED_LOBBY_HEADER_SIZE,&eurow,sizeof(eurow));
+    {
+        UnifiedRelay relay(body,REGIONAL_LOBBY_CAPABILITY,REGIONAL_LOBBY_REQUEST_TYPE,REGIONAL_LOBBY_RESPONSE_TYPE);
+        config(relay.port,"self");
+        service.ListRegionalRooms({0,0},{&page},{rows,sizeof(rows)});
+        assert(page.count==1&&page.status==ListStatusOk&&relay.queries==1);
+        assert(std::string(rows[0].provider)==REGION_PROVIDER_EU&&rows[0].group.room_access==RoomAccessHidden);
+        assert(std::all_of(std::begin(rows[0].reserved),std::end(rows[0].reserved),[](u8 b){return b==0;}));cases++;
+    }
+    for(unsigned bad=0;bad<8;bad++) {
+        auto invalid=body;const size_t row=UNIFIED_LOBBY_HEADER_SIZE,addr=row+offsetof(UnifiedGroup,reserved);
+        switch(bad) {
+            case 0:invalid[addr]^=1;break;
+            case 1:invalid[addr+4]^=1;break;
+            case 2:invalid[addr+6]=1;break;
+            case 3:std::memset(invalid.data()+row+offsetof(UnifiedGroup,provider),0,33);std::memcpy(invalid.data()+row+offsetof(UnifiedGroup,provider),"self",4);break;
+            case 4:put64(invalid.data()+row+8,UINT64_MAX);break;
+            case 5:invalid[row+34]=2;break;
+            case 6:invalid.pop_back();break;
+            case 7:invalid[row+offsetof(UnifiedGroup,provider)]='X';break;
+        }
+        UnifiedRelay relay(invalid,REGIONAL_LOBBY_CAPABILITY,REGIONAL_LOBBY_REQUEST_TYPE,REGIONAL_LOBBY_RESPONSE_TYPE);
+        config(relay.port,"self");
+        service.ListRegionalRooms({0,0},{&page},{rows,sizeof(rows)});
+        assert(page.count==-1&&page.status==ListStatusProtocol&&rows[0].group.game_id==0&&relay.queries==1);cases++;
+    }
+    {
+        UnifiedRelay relay({},UNIFIED_LOBBY_CAPABILITY);config(relay.port,"self");
+        service.ListRegionalRooms({0,0},{&page},{rows,sizeof(rows)});
+        assert(page.count==-1&&page.status==ListStatusUpdate&&relay.queries==0);cases++;
+    }
+    for(u8 error:{u8(4),u8(7),u8(11)}) {
+        UnifiedRelay relay({error},REGIONAL_LOBBY_CAPABILITY,REGIONAL_LOBBY_REQUEST_TYPE,T_Error);
+        config(relay.port,"self");service.ListRegionalRooms({0,0},{&page},{rows,sizeof(rows)});
+        const u32 expected=error==4?static_cast<u32>(ListStatusUpdate):lanywhere_list_error_status(error);
+        assert(page.count==-1&&page.status==expected&&relay.queries==1);cases++;
+    }
+    {
+        UnifiedRelay relay(body,REGIONAL_LOBBY_CAPABILITY,REGIONAL_LOBBY_REQUEST_TYPE,UNIFIED_LOBBY_RESPONSE_TYPE);
+        config(relay.port,"self");service.ListRegionalRooms({0,0},{&page},{rows,sizeof(rows)});
+        assert(page.count==-1&&page.status==ListStatusProtocol&&relay.queries==1);cases++;
+    }
+    {
+        UnifiedRelay relay(body,REGIONAL_LOBBY_CAPABILITY,REGIONAL_LOBBY_REQUEST_TYPE,REGIONAL_LOBBY_RESPONSE_TYPE,true);
+        config(relay.port,"self");service.ListRegionalRooms({0,0},{&page},{rows,sizeof(rows)});
+        assert(page.count==-1&&page.status==ListStatusTimeout&&relay.queries==1);cases++;
+    }
+    return cases;
+}
 int main() {
  unsigned checks=0;GroupPageV2 page;GroupSummaryV2 groups[6];
  for(int stage:{1,2,3})for(unsigned code:{6u,7u,8u,11u,13u}) {
@@ -252,11 +325,13 @@ int main() {
   assert(groups[0].room_access==RoomAccessNone);checks++;}
  fs::denied=true;assert(FindGroupSummaries(0,&page,groups,6)==-1 && page.reserved==ListStatusConfig);checks++;
  assert(sizeof(page)==16 && sizeof(groups[0])==336);
+ std::printf("Regional native IPC27: %u actual loopback scenarios passed.\n",testRegional());
  std::printf("Actual native listing slices: %u loopback/config + %u unified IPC24 scenarios passed; no external network or games.\n",checks,testUnified());
 }
 '''
 with tempfile.TemporaryDirectory(prefix='switch-native-list-status-') as tmp:
     tmp=Path(tmp); c=tmp/'test.cpp';exe=tmp/'test';c.write_text(template)
-    subprocess.run(shlex.split(os.environ.get('CXX','c++'))+['-std=c++17','-Wall','-Wextra','-Werror',
+    for eu_flags in ([], ['-DRELAY_PROFILE_EU_IPV4=\"127.0.0.1\"','-DRELAY_PROFILE_EU_PORT=11461']):
+        subprocess.run(shlex.split(os.environ.get('CXX','c++'))+eu_flags+['-std=c++17','-Wall','-Wextra','-Werror',
         '-Wno-unused-function','-pthread','-I'+str(ROOT/'common'),str(c),'-o',str(exe)],check=True,timeout=40)
-    subprocess.run([str(exe)],check=True,timeout=20)
+        subprocess.run([str(exe)],check=True,timeout=25)

@@ -29,7 +29,7 @@ def function(source, signature):
 def selection_state(source):
     start = source.index('        constexpr u64 HostRouteEpoch')
     end = source.index('        // Called with g_lock held. A reserved match', start)
-    return (source[start:end]
+    return ('#include "regional_relay.h"\n#ifndef RELAY_PROFILE_EU_IPV4\n#define RELAY_PROFILE_EU_IPV4 ""\n#endif\n#ifndef RELAY_PROFILE_EU_PORT\n#define RELAY_PROFILE_EU_PORT 11460\n#endif\n' + source[start:end]
             .replace('void ClearSelectionLocked(', '[[maybe_unused]] void ClearSelectionLocked(')
             .replace('void SelectRouteLocked(', '[[maybe_unused]] void SelectRouteLocked('))
 
